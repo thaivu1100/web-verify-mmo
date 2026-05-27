@@ -11,7 +11,7 @@
     "sqlite3-offline": "^4.3.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "20.x"
   },
   "author": "Thái Vũ",
   "license": "ISC"
