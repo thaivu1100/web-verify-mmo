@@ -2,5 +2,9 @@ services:
   - type: web
     name: web-verify-mmo
     env: node
+    plan: free
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.0
     buildCommand: npm install
     startCommand: node server.js
