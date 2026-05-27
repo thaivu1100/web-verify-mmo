@@ -1,0 +1,16 @@
+{
+  "name": "web-verify-mmo",
+  "version": "1.0.0",
+  "description": "Hệ thống xác thực chống cheat IP cho Telegram Bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "sqlite3": "^5.1.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

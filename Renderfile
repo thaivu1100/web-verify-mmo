@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: web-verify-mmo
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
