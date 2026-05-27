@@ -3,4 +3,4 @@ services:
     name: web-verify-mmo
     env: node
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node server.js
