@@ -1,6 +1,6 @@
 // Hệ thống Web Verify MMO - Phát triển bởi Thái Vũ & Tối ưu hóa cấu trúc bảo mật
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose(); // Khai báo thư viện để sửa lỗi crash
+const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
 const app = express();
@@ -9,6 +9,13 @@ const PORT = process.env.PORT || 3000;
 
 // Cấu hình thư mục lưu trữ DB. Trên Render, file DB nằm cùng thư mục code sẽ đọc ghi mượt mà
 const DB_PATH = path.join(__dirname, 'system.db');
+
+// 🎯 Hàm lấy ngày chuẩn múi giờ Việt Nam (dd-mm-yyyy) để đồng bộ tuyệt đối khi cần đối soát dữ liệu với Bot
+function getVietnamDate() {
+    const options = { timeZone: 'Asia/Ho_Chi_Minh', day: '2-digit', month: '2-digit', year: 'numeric' };
+    const formatter = new Intl.DateTimeFormat('en-GB', options);
+    return formatter.format(new Date()).replace(/\//g, '-'); 
+}
 
 const db = new sqlite3.Database(DB_PATH, (err) => {
     if (err) {
@@ -51,8 +58,12 @@ app.post('/api/create-token', (req, res) => {
         return res.status(400).json({ error: "Thiếu thông tin dữ liệu tạo phiên." });
     }
 
+    // [TỐI ƯU BẢO MẬT]: Tự động dọn dẹp tất cả token cũ đã quá hạn 30 phút trước khi nạp token mới để nhẹ DB
+    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-30 minutes')`);
+
+    // Đồng bộ ép kiểu dữ liệu user_id về dạng Chuỗi (String) để tránh lỗi lệch kiểu dữ liệu
     db.run(`INSERT OR REPLACE INTO active_tokens (token, user_id, task_type) VALUES (?, ?, ?)`, 
-        [token, user_id, task_type], (err) => {
+        [token, String(user_id), task_type], (err) => {
             if (err) {
                 return res.status(500).json({ error: "Lỗi ghi dữ liệu token vào DB: " + err.message });
             }
@@ -67,18 +78,21 @@ app.post('/api/create-token', (req, res) => {
 app.get('/verify/:token', (req, res) => {
     const token = req.params.token;
     
-    // Lấy IP thật và User-Agent của thiết bị truy cập
-    const userIP = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    // Lấy chính xác IP thật của người dùng (Render Proxy đã được trust ở trên)
+    const userIP = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
     const userAgent = req.headers['user-agent'] || 'Unknown';
 
-    // Bước 1: Check xem token có hợp lệ không
+    // Tự động quét dọn dẹp các token rác hết hạn
+    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-30 minutes')`);
+
+    // Bước 1: Check xem token có hợp lệ trong cơ sở dữ liệu không
     db.get(`SELECT * FROM active_tokens WHERE token = ?`, [token], (err, row) => {
         if (err || !row) {
             return res.send(`
-                <div style="font-family:Arial; text-align:center; margin-top:100px; color:#ff4757;">
-                    <h2>❌ LỖI: PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2>
-                    <p>Mã liên kết đã hết hạn hoặc bạn đã nhận thưởng cho nhiệm vụ này trước đó rồi!</p>
-                    <p>Vui lòng quay lại Telegram Bot để lấy link mới.</p>
+                <div style="font-family:'Segoe UI', Arial, sans-serif; text-align:center; margin-top:100px; color:#ff4757; padding: 20px;">
+                    <h2 style="font-size: 26px;">❌ LỖI: PHIÊN XÁC MINH KHÔNG TỒN TẠI HOẶC ĐÃ HẾT HẠN</h2>
+                    <p style="font-size: 16px; color: #57606f; margin-top: 10px;">Mã liên kết đã hết hiệu lực (tối đa 30 phút) hoặc bạn đã hoàn thành nhiệm vụ này trước đó rồi!</p>
+                    <p style="font-size: 14px; color: #747d8c;">Vui lòng quay lại Telegram Bot để lấy liên kết mới.</p>
                 </div>
             `);
         }
@@ -90,18 +104,18 @@ app.get('/verify/:token', (req, res) => {
         db.get(`SELECT COUNT(DISTINCT user_id) as count FROM ip_logs WHERE ip = ? AND accessed_at >= datetime('now', '-1 day') AND user_id != ?`, 
         [userIP, userId], (err, ipCheck) => {
             
-            // Nếu 1 IP mà đi giải link cho hơn 5 tài khoản khác nhau => Chặn cheat hệ thống ngay lập tức
+            // Nếu 1 IP mà cố tình đi giải link cho hơn 5 tài khoản khác nhau trong ngày => Khóa ngay lập tức
             if (ipCheck && ipCheck.count >= 5) {
                 return res.send(`
-                    <div style="font-family:Arial; text-align:center; margin-top:100px; color:#ee5253;">
-                        <h2>⚠️ CẢNH BÁO: PHIÊN XÁC THỰC BỊ KHÓA</h2>
-                        <p>Hệ thống phát hiện địa chỉ mạng của bạn đang chạy quá số lượng tài khoản cho phép (Tối đa 5 nick/IP).</p>
-                        <p>Nghiêm cấm dùng VPN, Proxy hoặc tool cày clone gian lận!</p>
+                    <div style="font-family:'Segoe UI', Arial, sans-serif; text-align:center; margin-top:100px; color:#ee5253; padding: 20px;">
+                        <h2 style="font-size: 26px;">⚠️ CẢNH BÁO: PHIÊN XÁC THỰC BỊ KHÓA DO GIAN LẬN</h2>
+                        <p style="font-size: 16px; margin-top: 10px;">Hệ thống phát hiện địa chỉ mạng của bạn đang chạy quá số lượng tài khoản cho phép (Tối đa 5 nick/IP).</p>
+                        <p style="font-size: 14px; color: #57606f;">Nghiêm cấm dùng tool cày clone, mạng ảo VPN hoặc Proxy để cheat link thưởng!</p>
                     </div>
                 `);
             }
 
-            // Bước 3: Ghi dữ liệu log IP hợp lệ vào bộ nhớ
+            // Bước 3: Ghi dữ liệu log IP hợp lệ vào bộ nhớ hệ thống
             db.run(`INSERT INTO ip_logs (ip, user_id, user_agent) VALUES (?, ?, ?)`, [userIP, userId, userAgent]);
 
             // Bước 4: Trả giao diện lấy Key đẹp mắt cho User sao chép
@@ -121,7 +135,7 @@ app.get('/verify/:token', (req, res) => {
                         p { color: #7f8c8d; font-size: 14px; line-height: 1.5; margin-bottom: 20px; }
                         .key-title { font-size: 13px; font-weight: bold; color: #57606f; text-transform: uppercase; text-align: left; margin-bottom: 6px; }
                         .key-container { position: relative; display: flex; align-items: center; background: #f1f2f6; border: 2px dashed #2ed573; padding: 12px 15px; border-radius: 8px; margin-bottom: 25px; }
-                        .key-text { font-family: 'Courier New', Courier, monospace; font-size: 16px; font-weight: bold; color: #ff4757; width: 85%; text-align: left; overflow-x: auto; white-space: nowrap; word-break: break-all; }
+                        .key-text { font-family: 'Courier New', Courier, monospace; font-size: 16px; font-weight: bold; color: #ff4757; width: 75%; text-align: left; overflow-x: auto; white-space: nowrap; word-break: break-all; }
                         .copy-btn { background: #2ed573; color: white; border: none; padding: 8px 12px; font-size: 12px; font-weight: bold; border-radius: 6px; cursor: pointer; transition: 0.2s; position: absolute; right: 10px; }
                         .copy-btn:hover { background: #26af5f; }
                         .footer-info { font-size: 11px; color: #a4b0be; border-top: 1px solid #f1f2f6; padding-top: 15px; text-align: left; line-height: 1.6; }
@@ -166,8 +180,9 @@ app.get('/verify/:token', (req, res) => {
                 </html>
             `);
             
-            // Xóa ngay token khỏi hàng chờ để tránh việc một mã nạp lại nhiều lần
-            db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
+            // 💡 QUAN TRỌNG: KHÔNG thực hiện DELETE token ở đây nữa! 
+            // Token sẽ được lưu giữ an toàn để người dùng có thể F5 tải lại trang thoải mái hoặc không bị các tool quét link nuốt mất mã.
+            // Các token cũ sẽ tự động bị xóa triệt để sau 30 phút ở cổng nhận /api/create-token.
         });
     });
 });
