@@ -1,6 +1,6 @@
 // Hệ thống Web Verify MMO - Phát triển bởi Thái Vũ & Tối ưu hóa cấu trúc bảo mật
 const express = require('express');
-const sqlite3 = require('sqlite3-offline').verbose(); // Khai báo thư viện để sửa lỗi crash
+const sqlite3 = require('sqlite3').verbose(); // Khai báo thư viện để sửa lỗi crash
 const path = require('path');
 
 const app = express();
