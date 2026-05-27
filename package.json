@@ -8,10 +8,10 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "sqlite3-offline": "^4.3.0"
+    "sqlite3": "^5.1.7"
   },
   "engines": {
-    "node": "20.x"
+    "node": ">=18.0.0"
   },
   "author": "Thái Vũ",
   "license": "ISC"
