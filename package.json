@@ -1,16 +1,18 @@
 {
   "name": "web-verify-mmo",
   "version": "1.0.0",
-  "description": "Hệ thống xác thực chống cheat IP cho Telegram Bot",
+  "description": "Hệ thống Web Verify MMO chống cheat",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "sqlite3": "5.1.6"
+    "sqlite3-offline": "^4.3.0"
   },
   "engines": {
-    "node": "18.x"
-  }
+    "node": ">=18.0.0"
+  },
+  "author": "Thái Vũ",
+  "license": "ISC"
 }
