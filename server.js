@@ -1,6 +1,6 @@
-// Hệ thống Web Verify MMO - Phát triển bởi Giang Ly & Tối ưu hóa cấu trúc bảo mật
+// Hệ thống Web Verify MMO - Phát triển bởi Thái Vũ & Tối ưu hóa cấu trúc bảo mật
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const sqlite3 = require('sqlite3-offline').verbose(); // Khai báo thư viện để sửa lỗi crash
 const path = require('path');
 
 const app = express();
@@ -94,7 +94,7 @@ app.get('/verify/:token', (req, res) => {
             if (ipCheck && ipCheck.count >= 5) {
                 return res.send(`
                     <div style="font-family:Arial; text-align:center; margin-top:100px; color:#ee5253;">
-                        <h2>⚠️ CẢNH BÁO: PHÁT HIỆN HÀNH VI SPAM TRÙNG IP</h2>
+                        <h2>⚠️ CẢNH BÁO: PHIÊN XÁC THỰC BỊ KHÓA</h2>
                         <p>Hệ thống phát hiện địa chỉ mạng của bạn đang chạy quá số lượng tài khoản cho phép (Tối đa 5 nick/IP).</p>
                         <p>Nghiêm cấm dùng VPN, Proxy hoặc tool cày clone gian lận!</p>
                     </div>
@@ -152,7 +152,6 @@ app.get('/verify/:token', (req, res) => {
                             navigator.clipboard.writeText(copyText).then(function() {
                                 alert("👉 Đã sao chép mã thành công! Hãy quay lại Bot Telegram dán mã để lấy tiền.");
                             }).catch(function() {
-                                // Phương án dự phòng cho trình duyệt cũ không hỗ trợ sao chép clipboard an toàn
                                 var input = document.createElement("input");
                                 input.value = copyText;
                                 document.body.appendChild(input);
@@ -167,7 +166,7 @@ app.get('/verify/:token', (req, res) => {
                 </html>
             `);
             
-            // Xóa ngay token khỏi hàng chờ để tránh user lưu link lại bấm giải liên tục (Một mã chỉ nạp được đúng một lần duy nhất)
+            // Xóa ngay token khỏi hàng chờ để tránh việc một mã nạp lại nhiều lần
             db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
         });
     });
