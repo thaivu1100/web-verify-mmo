@@ -14,7 +14,6 @@ const ADMIN_ID = 6327666718;
 // Lấy giờ Việt Nam (UTC+7)
 function getVietnamTime() {
     const now = new Date();
-    // Chuyển sang giờ Việt Nam (UTC+7)
     const vietnamTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
     return vietnamTime;
 }
@@ -245,18 +244,20 @@ app.get('/verify/:token', (req, res) => {
         
         const userId = row.user_id;
         const taskType = row.task_type;
+        const tokenValue = row.token;
         
         console.log(`[${currentDateTime}] Xử lý token cho User: ${userId} | Task: ${taskType} | IP: ${userIP}`);
         
-        // Kiểm tra IP trùng
+        // ==================== SỬA LỖI: CHỈ CẦN 2 IP TRÙNG LÀ BÁO ADMIN ====================
+        // Kiểm tra IP trùng - NGƯỠNG 2 TÀI KHOẢN (thay vì 5)
         db.get(`SELECT COUNT(DISTINCT user_id) as count FROM ip_logs 
                 WHERE ip = ? AND accessed_at >= datetime('now', '-1 day') AND user_id != ?`,
                 [userIP, userId], (err, ipCheck) => {
             
-            if (ipCheck && ipCheck.count >= 5) {
-                console.log(`[${currentDateTime}] CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipCheck.count}`);
-                // Thông báo cho Admin
-                notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipCheck.count} tài khoản khác trong ngày`);
+            // Nếu có từ 2 tài khoản trở lên dùng chung IP -> BÁO ADMIN
+            if (ipCheck && ipCheck.count >= 2) {
+                console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipCheck.count}`);
+                notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipCheck.count} tài khoản khác trong ngày`);
                 
                 return res.send(`
                     <!DOCTYPE html>
@@ -281,7 +282,7 @@ app.get('/verify/:token', (req, res) => {
                             <h2>BẠN KHÔNG THỂ NHẬP KEY VÌ TRÙNG IP</h2>
                             <div class="warning">
                                 <strong>⚠️ CẢNH BÁO HỆ THỐNG ⚠️</strong><br>
-                                IP của bạn đã phục vụ ${ipCheck.count}/5 tài khoản trong ngày
+                                IP của bạn đã phục vụ ${ipCheck.count}/2 tài khoản trong ngày
                             </div>
                             <p>🌐 IP: ${userIP}</p>
                             <p>⏰ Thời gian: ${currentDateTime}</p>
@@ -291,6 +292,7 @@ app.get('/verify/:token', (req, res) => {
                     </html>
                 `);
             }
+            // ==================== KẾT THÚC SỬA ====================
             
             // Kiểm tra giới hạn nhiệm vụ trong ngày
             checkDailyLimit(userId, userIP, taskType, (err, allowed, reward, maxCount, currentCount) => {
@@ -338,12 +340,8 @@ app.get('/verify/:token', (req, res) => {
                         [userIP, userId, userAgent, taskType]);
                 updateDailyLimit(userId, userIP, taskType);
                 
-                // Xóa token sau khi sử dụng thành công
-                db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
-                
                 console.log(`[${currentDateTime}] THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${reward}Đ`);
                 
-                // Hiển thị trang thành công với mã key
                 res.send(`
                     <!DOCTYPE html>
                     <html lang="vi">
@@ -513,8 +511,8 @@ app.get('/verify/:token', (req, res) => {
                             
                             <div class="key-title">🔑 MÃ XÁC MINH CỦA BẠN:</div>
                             <div class="key-container">
-                                <div class="key-text" id="keyText">${token}</div>
-                                <button class="copy-btn" onclick="copyKey()">📋 COPY MÃ</button>
+                                <div class="key-text" id="keyText">${tokenValue}</div>
+                                <button class="copy-btn" onclick="copyKeyAndDelete()">📋 COPY MÃ</button>
                             </div>
                             
                             <div class="footer-info">
@@ -525,10 +523,23 @@ app.get('/verify/:token', (req, res) => {
                             </div>
                         </div>
                         <script>
-                            function copyKey() {
+                            let tokenDeleted = false;
+                            
+                            function deleteToken() {
+                                if (tokenDeleted) return;
+                                tokenDeleted = true;
+                                fetch('/api/delete-token', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ token: '${tokenValue}' })
+                                }).catch(err => console.log('Lỗi xóa token:', err));
+                            }
+                            
+                            function copyKeyAndDelete() {
                                 const keyText = document.getElementById("keyText").innerText;
                                 navigator.clipboard.writeText(keyText).then(() => {
                                     alert("✅ Đã sao chép mã thành công!\\n\\n👉 Quay lại Bot Telegram và dán mã để nhận tiền thưởng!");
+                                    deleteToken();
                                 }).catch(() => {
                                     const textarea = document.createElement("textarea");
                                     textarea.value = keyText;
@@ -537,8 +548,13 @@ app.get('/verify/:token', (req, res) => {
                                     document.execCommand("copy");
                                     document.body.removeChild(textarea);
                                     alert("✅ Đã sao chép mã thành công!\\n\\n👉 Quay lại Bot Telegram và dán mã để nhận tiền thưởng!");
+                                    deleteToken();
                                 });
                             }
+                            
+                            setTimeout(function() {
+                                deleteToken();
+                            }, 300000);
                         </script>
                     </body>
                     </html>
@@ -546,6 +562,18 @@ app.get('/verify/:token', (req, res) => {
             });
         });
     });
+});
+
+// API xóa token sau khi người dùng đã copy mã
+app.post('/api/delete-token', (req, res) => {
+    const { token } = req.body;
+    if (token) {
+        db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
+        console.log(`[${getVietnamDateTime()}] Đã xóa token: ${token.substring(0, 10)}...`);
+        res.json({ status: "deleted" });
+    } else {
+        res.status(400).json({ error: "Thiếu token" });
+    }
 });
 
 // API kiểm tra trạng thái server
