@@ -1,191 +1,289 @@
 // Hệ thống Web Verify MMO - Phát triển bởi Thái Vũ & Tối ưu hóa cấu trúc bảo mật
+
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
 const app = express();
-// Render sử dụng biến PORT môi trường tự động cấp phát, mặc định là 3000 nếu chạy local
 const PORT = process.env.PORT || 3000;
-
-// Cấu hình thư mục lưu trữ DB. Trên Render, file DB nằm cùng thư mục code sẽ đọc ghi mượt mà
 const DB_PATH = path.join(__dirname, 'system.db');
 
-// 🎯 Hàm lấy ngày chuẩn múi giờ Việt Nam (dd-mm-yyyy) để đồng bộ tuyệt đối khi cần đối soát dữ liệu với Bot
+// ADMIN ID
+const ADMIN_ID = 6327666718;
+
 function getVietnamDate() {
     const options = { timeZone: 'Asia/Ho_Chi_Minh', day: '2-digit', month: '2-digit', year: 'numeric' };
     const formatter = new Intl.DateTimeFormat('en-GB', options);
-    return formatter.format(new Date()).replace(/\//g, '-'); 
+    return formatter.format(new Date()).replace(/\//g, '-');
+}
+
+function getVietnamDateTime() {
+    const options = { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+    const formatter = new Intl.DateTimeFormat('en-GB', options);
+    return formatter.format(new Date()).replace(/\//g, '-').replace(/,/g, ' ');
 }
 
 const db = new sqlite3.Database(DB_PATH, (err) => {
     if (err) {
-        console.error('❌ Lỗi kết nối Cơ sở dữ liệu Web:', err.message);
+        console.error('❌ Lỗi kết nối DB:', err.message);
     } else {
-        console.log('✅ Đã kết nối SQLite thành công tại:', DB_PATH);
-        // Tạo bảng chứa Token tạm thời do Bot đẩy sang
+        console.log('✅ Kết nối SQLite thành công');
+        
         db.run(`CREATE TABLE IF NOT EXISTS active_tokens (
             token TEXT PRIMARY KEY,
             user_id TEXT,
             task_type TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
-        // Tạo bảng Log ghi vết IP, Thiết bị để kiểm tra spam chống cheat
+        
         db.run(`CREATE TABLE IF NOT EXISTS ip_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             ip TEXT,
             user_id TEXT,
             user_agent TEXT,
+            task_type TEXT,
             accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+        
+        db.run(`CREATE TABLE IF NOT EXISTS daily_task_limit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            ip TEXT,
+            task_type TEXT,
+            count INTEGER DEFAULT 1,
+            task_date TEXT
         )`);
     }
 });
 
-// BẮT BUỘC: Cho phép Express đọc IP thật từ proxy trung gian của Render/Cloudflare
 app.set('trust proxy', true);
 app.use(express.json());
 
-// ─────────────────────────────────────────────────────────────────
-// API 1: NHẬN TOKEN TỪ BOT TELEGRAM ĐẨY SANG
-// ─────────────────────────────────────────────────────────────────
+// Gửi thông báo đến Admin qua Telegram
+function notifyAdmin(message) {
+    const fetch = require('node-fetch');
+    const token = '8649791125:AAED_yDtgpml3ioVca-sAgLCBPhVnYS2QcA';
+    fetch(`https://api.telegram.org/bot${token}/sendMessage?chat_id=${ADMIN_ID}&text=${encodeURIComponent(message)}`)
+        .catch(err => console.error('Lỗi gửi thông báo admin:', err));
+}
+
+// Kiểm tra giới hạn nhiệm vụ theo ngày
+function checkDailyLimit(user_id, ip, task_type, callback) {
+    const today = getVietnamDate();
+    const limits = {
+        'LINK4M': { max: 1, reward: 300 },
+        'SITE2S': { max: 2, reward: 150 },
+        'YEUMONEY': { max: 3, reward: 300 },
+        'BBMKTS': { max: 1, reward: 300 },
+        'LAYMA': { max: 4, reward: 400 },
+        'NHAPMA': { max: 4, reward: 500 },
+        'TAPLAYMA': { max: 4, reward: 500 }
+    };
+    
+    const limit = limits[task_type];
+    if (!limit) {
+        callback(null, true, 300);
+        return;
+    }
+    
+    db.get(`SELECT SUM(count) as total FROM daily_task_limit 
+            WHERE (user_id = ? OR ip = ?) AND task_type = ? AND task_date = ?`,
+            [user_id, ip, task_type, today], (err, row) => {
+        if (err) {
+            callback(err, true, limit.reward);
+            return;
+        }
+        const currentCount = row?.total || 0;
+        if (currentCount >= limit.max) {
+            callback(null, false, limit.reward, limit.max, currentCount);
+        } else {
+            callback(null, true, limit.reward);
+        }
+    });
+}
+
+// Cập nhật giới hạn nhiệm vụ
+function updateDailyLimit(user_id, ip, task_type) {
+    const today = getVietnamDate();
+    db.run(`INSERT INTO daily_task_limit (user_id, ip, task_type, task_date) 
+            VALUES (?, ?, ?, ?)`, [user_id, ip, task_type, today]);
+}
+
+// API tạo token
 app.post('/api/create-token', (req, res) => {
     const { secret_key, user_id, task_type, token } = req.body;
     
-    // Khóa bảo mật đối soát, chỉ cho phép Bot của bạn gọi vào endpoint này
     if (secret_key !== "MY_SUPER_SECRET_PASSPHRASE_123") {
-        return res.status(403).json({ error: "Yêu cầu bị từ chối! Sai Secret Key." });
+        return res.status(403).json({ error: "Sai Secret Key" });
     }
-
+    
     if (!token || !user_id) {
-        return res.status(400).json({ error: "Thiếu thông tin dữ liệu tạo phiên." });
+        return res.status(400).json({ error: "Thiếu thông tin" });
     }
-
-    // [TỐI ƯU BẢO MẬT]: Tự động dọn dẹp tất cả token cũ đã quá hạn 30 phút trước khi nạp token mới để nhẹ DB
+    
     db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-30 minutes')`);
-
-    // Đồng bộ ép kiểu dữ liệu user_id về dạng Chuỗi (String) để tránh lỗi lệch kiểu dữ liệu
+    
     db.run(`INSERT OR REPLACE INTO active_tokens (token, user_id, task_type) VALUES (?, ?, ?)`, 
         [token, String(user_id), task_type], (err) => {
             if (err) {
-                return res.status(500).json({ error: "Lỗi ghi dữ liệu token vào DB: " + err.message });
+                return res.status(500).json({ error: "Lỗi ghi token" });
             }
             res.json({ status: "success" });
-        }
-    );
+        });
 });
 
-// ─────────────────────────────────────────────────────────────────
-// TRANG ĐÍCH: NƠI USER NHẢY VỀ SAU KHI VƯỢT XONG SHORTLINK
-// ─────────────────────────────────────────────────────────────────
+// Kiểm tra thời gian làm nhiệm vụ (6H - 24H)
+function isWithinTaskTime() {
+    const now = new Date();
+    const hours = now.getHours();
+    return hours >= 6 && hours < 24;
+}
+
+// Trang xác minh
 app.get('/verify/:token', (req, res) => {
     const token = req.params.token;
-    
-    // Lấy chính xác IP thật của người dùng (Render Proxy đã được trust ở trên)
     const userIP = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
     const userAgent = req.headers['user-agent'] || 'Unknown';
-
-    // Tự động quét dọn dẹp các token rác hết hạn
+    
+    // Kiểm tra thời gian
+    if (!isWithinTaskTime()) {
+        return res.send(`
+            <div style="font-family:'Segoe UI', Arial, sans-serif; text-align:center; margin-top:100px; color:#ff4757; padding: 20px;">
+                <h2 style="font-size: 26px;">⏰ ĐÃ HẾT THỜI GIAN LÀM NHIỆM VỤ</h2>
+                <p style="font-size: 16px;">Thời gian làm nhiệm vụ từ 6H đến 24H hàng ngày!</p>
+                <p style="font-size: 14px;">Vui lòng quay lại từ 6H sáng hôm sau.</p>
+            </div>
+        `);
+    }
+    
     db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-30 minutes')`);
-
-    // Bước 1: Check xem token có hợp lệ trong cơ sở dữ liệu không
+    
     db.get(`SELECT * FROM active_tokens WHERE token = ?`, [token], (err, row) => {
         if (err || !row) {
             return res.send(`
                 <div style="font-family:'Segoe UI', Arial, sans-serif; text-align:center; margin-top:100px; color:#ff4757; padding: 20px;">
-                    <h2 style="font-size: 26px;">❌ LỖI: PHIÊN XÁC MINH KHÔNG TỒN TẠI HOẶC ĐÃ HẾT HẠN</h2>
-                    <p style="font-size: 16px; color: #57606f; margin-top: 10px;">Mã liên kết đã hết hiệu lực (tối đa 30 phút) hoặc bạn đã hoàn thành nhiệm vụ này trước đó rồi!</p>
-                    <p style="font-size: 14px; color: #747d8c;">Vui lòng quay lại Telegram Bot để lấy liên kết mới.</p>
+                    <h2>❌ PHIÊN XÁC MINH KHÔNG TỒN TẠI HOẶC ĐÃ HẾT HẠN</h2>
+                    <p>Mã liên kết đã hết hiệu lực (tối đa 30 phút)</p>
                 </div>
             `);
         }
-
+        
         const userId = row.user_id;
         const taskType = row.task_type;
-
-        // Bước 2: Thuật toán Anti-Fraud: Quét xem IP này trong vòng 24h qua đã giải hộ cho bao nhiêu tài khoản khác nhau rồi
-        db.get(`SELECT COUNT(DISTINCT user_id) as count FROM ip_logs WHERE ip = ? AND accessed_at >= datetime('now', '-1 day') AND user_id != ?`, 
-        [userIP, userId], (err, ipCheck) => {
+        
+        // Kiểm tra IP trùng
+        db.get(`SELECT COUNT(DISTINCT user_id) as count FROM ip_logs 
+                WHERE ip = ? AND accessed_at >= datetime('now', '-1 day') AND user_id != ?`,
+                [userIP, userId], (err, ipCheck) => {
             
-            // Nếu 1 IP mà cố tình đi giải link cho hơn 5 tài khoản khác nhau trong ngày => Khóa ngay lập tức
             if (ipCheck && ipCheck.count >= 5) {
+                // Thông báo cho Admin
+                notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${getVietnamDateTime()}\nLý do: IP đã phục vụ ${ipCheck.count} tài khoản khác trong ngày`);
+                
                 return res.send(`
                     <div style="font-family:'Segoe UI', Arial, sans-serif; text-align:center; margin-top:100px; color:#ee5253; padding: 20px;">
-                        <h2 style="font-size: 26px;">⚠️ CẢNH BÁO: PHIÊN XÁC THỰC BỊ KHÓA DO GIAN LẬN</h2>
-                        <p style="font-size: 16px; margin-top: 10px;">Hệ thống phát hiện địa chỉ mạng của bạn đang chạy quá số lượng tài khoản cho phép (Tối đa 5 nick/IP).</p>
-                        <p style="font-size: 14px; color: #57606f;">Nghiêm cấm dùng tool cày clone, mạng ảo VPN hoặc Proxy để cheat link thưởng!</p>
+                        <h2>⚠️ BẠN KHÔNG THỂ NHẬP KEY VÌ TRÙNG IP</h2>
+                        <p>Hệ thống phát hiện địa chỉ mạng của bạn đang chạy quá số lượng tài khoản cho phép (Tối đa 5 nick/IP).</p>
+                        <p style="font-size: 12px; color: #666;">Thông tin đã được ghi nhận và báo cáo Admin.</p>
                     </div>
                 `);
             }
-
-            // Bước 3: Ghi dữ liệu log IP hợp lệ vào bộ nhớ hệ thống
-            db.run(`INSERT INTO ip_logs (ip, user_id, user_agent) VALUES (?, ?, ?)`, [userIP, userId, userAgent]);
-
-            // Bước 4: Trả giao diện lấy Key đẹp mắt cho User sao chép
-            res.send(`
-                <!DOCTYPE html>
-                <html lang="vi">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>XÁC MINH HOÀN THÀNH - CHỐNG CHEAT</title>
-                    <style>
-                        * { margin: 0; padding: 0; box-sizing: border-box; }
-                        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
-                        .container { background: #ffffff; padding: 35px 25px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08); text-align: center; max-width: 450px; width: 100%; border-top: 6px solid #2ed573; }
-                        .icon-success { font-size: 60px; color: #2ed573; margin-bottom: 15px; }
-                        h2 { color: #2c3e50; font-size: 22px; margin-bottom: 10px; font-weight: 700; }
-                        p { color: #7f8c8d; font-size: 14px; line-height: 1.5; margin-bottom: 20px; }
-                        .key-title { font-size: 13px; font-weight: bold; color: #57606f; text-transform: uppercase; text-align: left; margin-bottom: 6px; }
-                        .key-container { position: relative; display: flex; align-items: center; background: #f1f2f6; border: 2px dashed #2ed573; padding: 12px 15px; border-radius: 8px; margin-bottom: 25px; }
-                        .key-text { font-family: 'Courier New', Courier, monospace; font-size: 16px; font-weight: bold; color: #ff4757; width: 75%; text-align: left; overflow-x: auto; white-space: nowrap; word-break: break-all; }
-                        .copy-btn { background: #2ed573; color: white; border: none; padding: 8px 12px; font-size: 12px; font-weight: bold; border-radius: 6px; cursor: pointer; transition: 0.2s; position: absolute; right: 10px; }
-                        .copy-btn:hover { background: #26af5f; }
-                        .footer-info { font-size: 11px; color: #a4b0be; border-top: 1px solid #f1f2f6; padding-top: 15px; text-align: left; line-height: 1.6; }
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <div class="icon-success">🎉</div>
-                        <h2>VƯỢT LINK THÀNH CÔNG!</h2>
-                        <p>Bạn đã hoàn thành nhiệm vụ cổng <strong>${taskType}</strong>. Sao chép Mã xác minh (Key) dưới đây để nhận tiền thưởng.</p>
-                        
-                        <div class="key-title">Mã xác minh của bạn:</div>
-                        <div class="key-container">
-                            <div class="key-text" id="keyText">${token}</div>
-                            <button class="copy-btn" onclick="copyKey()">COPY</button>
-                        </div>
-
-                        <div class="footer-info">
-                            🌐 IP mạng: ${userIP}<br>
-                            📱 Thiết bị: ${userAgent.substring(0, 45)}...<br>
-                            🛡️ <em>Hệ thống bảo mật ghi nhận tự động chống Spam.</em>
-                        </div>
-                    </div>
-
-                    <script>
-                        function copyKey() {
-                            var copyText = document.getElementById("keyText").innerText;
-                            navigator.clipboard.writeText(copyText).then(function() {
-                                alert("👉 Đã sao chép mã thành công! Hãy quay lại Bot Telegram dán mã để lấy tiền.");
-                            }).catch(function() {
-                                var input = document.createElement("input");
-                                input.value = copyText;
-                                document.body.appendChild(input);
-                                input.select();
-                                document.execCommand("copy");
-                                document.body.removeChild(input);
-                                alert("👉 Đã sao chép mã thành công!");
-                            });
-                        }
-                    </script>
-                </body>
-                </html>
-            `);
             
-            // 💡 QUAN TRỌNG: KHÔNG thực hiện DELETE token ở đây nữa! 
-            // Token sẽ được lưu giữ an toàn để người dùng có thể F5 tải lại trang thoải mái hoặc không bị các tool quét link nuốt mất mã.
-            // Các token cũ sẽ tự động bị xóa triệt để sau 30 phút ở cổng nhận /api/create-token.
+            // Kiểm tra giới hạn nhiệm vụ trong ngày
+            checkDailyLimit(userId, userIP, taskType, (err, allowed, reward, maxCount, currentCount) => {
+                if (!allowed) {
+                    const limits = {
+                        'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4
+                    };
+                    return res.send(`
+                        <div style="font-family:'Segoe UI', Arial, sans-serif; text-align:center; margin-top:100px; color:#ff4757; padding: 20px;">
+                            <h2>⚠️ BẠN ĐÃ ĐẠT GIỚI HẠN NHIỆM VỤ HÔM NAY</h2>
+                            <p>Cổng <strong>${taskType}</strong> chỉ được vượt <strong>${limits[taskType]}</strong> lần/ngày!</p>
+                            <p>Bạn đã vượt: ${currentCount}/${limits[taskType]}</p>
+                            <p>Vui lòng quay lại từ 6H sáng hôm sau.</p>
+                        </div>
+                    `);
+                }
+                
+                // Ghi log và cập nhật giới hạn
+                db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
+                        [userIP, userId, userAgent, taskType]);
+                updateDailyLimit(userId, userIP, taskType);
+                
+                // Xóa token sau khi sử dụng thành công
+                db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
+                
+                // Hiển thị trang thành công với mã key
+                res.send(`
+                    <!DOCTYPE html>
+                    <html lang="vi">
+                    <head>
+                        <meta charset="UTF-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <title>XÁC MINH THÀNH CÔNG</title>
+                        <style>
+                            * { margin: 0; padding: 0; box-sizing: border-box; }
+                            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
+                            .container { background: #ffffff; padding: 35px 25px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2); text-align: center; max-width: 500px; width: 100%; }
+                            .icon-success { font-size: 70px; margin-bottom: 15px; animation: bounce 0.5s ease; }
+                            @keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+                            h2 { color: #2ed573; font-size: 26px; margin-bottom: 10px; font-weight: 700; }
+                            p { color: #7f8c8d; font-size: 14px; line-height: 1.6; margin-bottom: 20px; }
+                            .reward-box { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 15px; border-radius: 12px; margin-bottom: 20px; }
+                            .reward-box span { color: #ffd700; font-size: 28px; font-weight: bold; display: block; }
+                            .key-title { font-size: 13px; font-weight: bold; color: #57606f; text-transform: uppercase; text-align: left; margin-bottom: 6px; }
+                            .key-container { position: relative; display: flex; align-items: center; background: #f1f2f6; border: 2px solid #2ed573; padding: 12px 15px; border-radius: 12px; margin-bottom: 25px; }
+                            .key-text { font-family: 'Courier New', monospace; font-size: 14px; font-weight: bold; color: #ff4757; flex: 1; text-align: left; overflow-x: auto; word-break: break-all; }
+                            .copy-btn { background: #2ed573; color: white; border: none; padding: 8px 16px; font-size: 12px; font-weight: bold; border-radius: 8px; cursor: pointer; transition: 0.2s; margin-left: 10px; }
+                            .copy-btn:hover { background: #26af5f; transform: scale(1.05); }
+                            .footer-info { font-size: 11px; color: #a4b0be; border-top: 1px solid #f1f2f6; padding-top: 15px; text-align: left; line-height: 1.6; }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="container">
+                            <div class="icon-success">🎉✨</div>
+                            <h2>VƯỢT LINK THÀNH CÔNG!</h2>
+                            <div class="reward-box">
+                                <span>+${reward}₫</span>
+                                <small style="color: white;">Đã cộng vào tài khoản của bạn</small>
+                            </div>
+                            <p>Bạn đã hoàn thành nhiệm vụ <strong>${taskType}</strong></p>
+                            
+                            <div class="key-title">🔑 MÃ XÁC MINH CỦA BẠN:</div>
+                            <div class="key-container">
+                                <div class="key-text" id="keyText">${token}</div>
+                                <button class="copy-btn" onclick="copyKey()">📋 COPY</button>
+                            </div>
+                            
+                            <div class="footer-info">
+                                🌐 IP: ${userIP}<br>
+                                📱 Thiết bị: ${userAgent.substring(0, 40)}...<br>
+                                ⏰ Thời gian: ${getVietnamDateTime()}<br>
+                                🛡️ <em>Dán mã này vào Bot Telegram để nhận thưởng!</em>
+                            </div>
+                        </div>
+                        <script>
+                            function copyKey() {
+                                navigator.clipboard.writeText(document.getElementById("keyText").innerText).then(() => {
+                                    alert("✅ Đã sao chép mã! Quay lại Bot Telegram dán mã để nhận tiền.");
+                                }).catch(() => {
+                                    alert("✅ Đã sao chép mã thành công!");
+                                });
+                            }
+                        </script>
+                    </body>
+                    </html>
+                `);
+            });
         });
     });
 });
 
-// Khởi chạy server
-app.listen(PORT, () => console.log(`🚀 Web Verify MMO Server đang chạy cực tốt tại cổng ${PORT}`));
+// Xóa IP logs cũ sau 24H
+setInterval(() => {
+    db.run(`DELETE FROM ip_logs WHERE accessed_at <= datetime('now', '-1 day')`);
+    db.run(`DELETE FROM daily_task_limit WHERE task_date < date('now')`);
+    console.log('🗑️ Đã xóa logs cũ sau 24H');
+}, 3600000);
+
+app.listen(PORT, () => console.log(`🚀 Web Verify Server chạy tại cổng ${PORT}`));
