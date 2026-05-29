@@ -91,12 +91,14 @@ function checkDailyLimit(user_id, ip, task_type, callback) {
     const today = getVietnamDate();
     const limits = {
         'LINK4M': { max: 1, reward: 300 },
-        'SITE2S': { max: 2, reward: 150 },
+        'SITE2S': { max: 2, reward: 300 },
         'YEUMONEY': { max: 3, reward: 300 },
         'BBMKTS': { max: 1, reward: 300 },
         'LAYMA': { max: 4, reward: 400 },
         'NHAPMA': { max: 4, reward: 500 },
-        'TAPLAYMA': { max: 4, reward: 500 }
+        'TAPLAYMA': { max: 4, reward: 500 },
+        'LINK2M': { max: 2, reward: 300 },
+        'SHRINKME': { max: 1, reward: 50 }
     };
     
     const limit = limits[task_type];
@@ -248,13 +250,11 @@ app.get('/verify/:token', (req, res) => {
         
         console.log(`[${currentDateTime}] Xử lý token cho User: ${userId} | Task: ${taskType} | IP: ${userIP}`);
         
-        // ==================== SỬA LỖI: CHỈ CẦN 2 IP TRÙNG LÀ BÁO ADMIN ====================
-        // Kiểm tra IP trùng - NGƯỠNG 2 TÀI KHOẢN (thay vì 5)
+        // Kiểm tra IP trùng - NGƯỠNG 2 TÀI KHOẢN
         db.get(`SELECT COUNT(DISTINCT user_id) as count FROM ip_logs 
                 WHERE ip = ? AND accessed_at >= datetime('now', '-1 day') AND user_id != ?`,
                 [userIP, userId], (err, ipCheck) => {
             
-            // Nếu có từ 2 tài khoản trở lên dùng chung IP -> BÁO ADMIN
             if (ipCheck && ipCheck.count >= 2) {
                 console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipCheck.count}`);
                 notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipCheck.count} tài khoản khác trong ngày`);
@@ -292,13 +292,12 @@ app.get('/verify/:token', (req, res) => {
                     </html>
                 `);
             }
-            // ==================== KẾT THÚC SỬA ====================
             
             // Kiểm tra giới hạn nhiệm vụ trong ngày
             checkDailyLimit(userId, userIP, taskType, (err, allowed, reward, maxCount, currentCount) => {
                 if (!allowed) {
                     const limits = {
-                        'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4
+                        'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
                     };
                     console.log(`[${currentDateTime}] Từ chối: User ${userId} đã đạt giới hạn ${taskType} (${currentCount}/${limits[taskType]})`);
                     return res.send(`
