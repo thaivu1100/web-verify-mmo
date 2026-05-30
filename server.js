@@ -11,10 +11,6 @@ const DB_PATH = path.join(__dirname, 'system.db');
 // ADMIN ID
 const ADMIN_ID = 6327666718;
 
-// Bot API URL để kiểm tra giới hạn (Flask API chạy cùng bot)
-const BOT_API_URL = 'https://web-verify-mmo.onrender.com'; // Thay bằng URL thật của bot
-// HOẶC nếu bot chạy cùng server thì dùng: const BOT_API_URL = 'http://localhost:5000';
-
 // Lấy giờ Việt Nam (UTC+7)
 function getVietnamTime() {
     const now = new Date();
@@ -94,7 +90,7 @@ function notifyAdmin(message) {
 async function checkDailyLimitFromBot(user_id, task_type) {
     const fetch = require('node-fetch');
     try {
-        const response = await fetch(`${BOT_API_URL}/api/bot/check-limit`, {
+        const response = await fetch(`https://web-verify-mmo.onrender.com/api/bot/check-limit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -109,11 +105,10 @@ async function checkDailyLimitFromBot(user_id, task_type) {
             allowed: !data.is_limit_reached,
             currentCount: data.current_count,
             dailyLimit: data.daily_limit,
-            reward: 300 // Sẽ lấy từ API_SHORTENERS trong bot
+            reward: 300
         };
     } catch (error) {
         console.error('Lỗi gọi API bot check limit:', error);
-        // Fallback: cho phép tạm thời (tránh lỗi server)
         return { allowed: true, currentCount: 0, dailyLimit: 999, reward: 300 };
     }
 }
@@ -168,14 +163,15 @@ app.post('/api/create-token', (req, res) => {
         return res.status(400).json({ error: "Thiếu thông tin" });
     }
     
-    // Tăng thời gian token lên 60 phút thay vì 30 phút
-    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-60 minutes')`);
+    // TĂNG THỜI GIAN TOKEN LÊN 120 PHÚT THAY VÌ 60 PHÚT
+    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-120 minutes')`);
     
-    db.run(`INSERT OR REPLACE INTO active_tokens (token, user_id, task_type) VALUES (?, ?, ?)`, 
+    db.run(`INSERT OR REPLACE INTO active_tokens (token, user_id, task_type, created_at) VALUES (?, ?, ?, datetime('now'))`, 
         [token, String(user_id), task_type], (err) => {
             if (err) {
                 return res.status(500).json({ error: "Lỗi ghi token" });
             }
+            console.log(`[CREATE TOKEN] Token: ${token.substring(0, 10)}..., User: ${user_id}, Task: ${task_type}`);
             res.json({ status: "success" });
         });
 });
@@ -263,8 +259,8 @@ app.get('/verify/:token', async (req, res) => {
         `);
     }
     
-    // Xóa token cũ quá 60 phút
-    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-60 minutes')`);
+    // KHÔNG XÓA TOKEN CŨ NGAY LẬP TỨC - chỉ xóa token quá 120 phút
+    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-120 minutes')`);
     
     db.get(`SELECT * FROM active_tokens WHERE token = ?`, [token], async (err, row) => {
         if (err || !row) {
@@ -290,7 +286,7 @@ app.get('/verify/:token', async (req, res) => {
                     <div class="container">
                         <div class="icon">❌⌛</div>
                         <h2>PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2>
-                        <p>Mã liên kết đã hết hiệu lực (tối đa 60 phút)</p>
+                        <p>Mã liên kết đã hết hiệu lực (tối đa 120 phút)</p>
                         <p>🕐 Thời gian hiện tại: ${currentDateTime}</p>
                         <a href="https://t.me/Vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
                     </div>
@@ -411,7 +407,7 @@ app.get('/verify/:token', async (req, res) => {
             console.log(`[${currentDateTime}] ✅ THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${limitResult.reward || 300}Đ | IP: ${userIP}`);
             
             // KHÔNG XÓA TOKEN NGAY - giữ lại để bot check vẫn thấy hợp lệ
-            // Token sẽ tự động xóa sau 60 phút
+            // Token sẽ tự động xóa sau 120 phút
             
             res.send(`
                 <!DOCTYPE html>
