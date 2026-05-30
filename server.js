@@ -210,7 +210,7 @@ function isWithinTaskTime() {
     return hour >= 6 && hour < 24;
 }
 
-// Trang xác minh - 🔧 SỬA LỖI: Kiểm tra giới hạn NGAY TỪ ĐẦU
+// Trang xác minh - KIỂM TRA GIỚI HẠN NGAY TỪ ĐẦU
 app.get('/verify/:token', (req, res) => {
     const token = req.params.token;
     const userIP = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
@@ -301,7 +301,7 @@ app.get('/verify/:token', (req, res) => {
         
         console.log(`[${currentDateTime}] Xử lý token cho User: ${userId} | Task: ${taskType} | IP: ${userIP}`);
         
-        // 🔧 SỬA LỖI: KIỂM TRA GIỚI HẠN NGAY TỪ ĐẦU TRƯỚC KHI XỬ LÝ
+        // KIỂM TRA GIỚI HẠN NGAY TỪ ĐẦU TRƯỚC KHI XỬ LÝ
         checkDailyLimit(userId, taskType, (err, allowed, reward, maxCount, currentCount) => {
             const limits = {
                 'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
@@ -345,7 +345,7 @@ app.get('/verify/:token', (req, res) => {
                 `);
             }
             
-            // Bước 1: Kiểm tra IP đã dùng cho bao nhiêu user (chống clone - giới hạn 2 user/IP)
+            // Kiểm tra IP đã dùng cho bao nhiêu user (chống clone - giới hạn 2 user/IP)
             checkIpUsage(userIP, userId, (err, ipUserCount) => {
                 if (err) {
                     console.error('Lỗi checkIpUsage:', err);
@@ -389,7 +389,7 @@ app.get('/verify/:token', (req, res) => {
                     `);
                 }
                 
-                // Bước 2: Ghi nhận thành công - cập nhật limit và log IP
+                // Ghi nhận thành công - cập nhật limit và log IP
                 updateDailyLimit(userId, userIP, taskType);
                 
                 db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
