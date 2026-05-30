@@ -290,7 +290,7 @@ app.get('/verify/:token', (req, res) => {
                         <h2>PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2>
                         <p>Mã liên kết đã hết hiệu lực (tối đa 60 phút)</p>
                         <p>🕐 Thời gian hiện tại: ${currentDateTime}</p>
-                        <a href="https://t.me/Vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
+                        <a href="https://t.me/Vuotlinkcaytien1_bot" class="btn">🤖 Quay lại Bot</a>
                     </div>
                 </body>
                 </html>
@@ -303,15 +303,19 @@ app.get('/verify/:token', (req, res) => {
         
         console.log(`[${currentDateTime}] Xử lý token cho User: ${userId} | Task: ${taskType} | IP: ${userIP}`);
         
-        // KIỂM TRA GIỚI HẠN NGAY TỪ ĐẦU TRƯỚC KHI XỬ LÝ
+        // ========== KIỂM TRA GIỚI HẠN NGAY TỪ ĐẦU TRƯỚC KHI XỬ LÝ ==========
         checkDailyLimit(userId, taskType, (err, allowed, reward, maxCount, currentCount) => {
             const limits = {
                 'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
             };
             
-            // Nếu đã đạt giới hạn, KHÔNG cho vào web - trả về trang lỗi ngay
+            // Nếu đã đạt giới hạn, KHÔNG cho vào web - KHÔNG HIỂN THỊ MÃ KEY
             if (!allowed) {
-                console.log(`[${currentDateTime}] TỪ CHỐI NGAY TỪ ĐẦU: User ${userId} đã đạt giới hạn ${taskType} (${currentCount}/${limits[taskType]})`);
+                console.log(`[${currentDateTime}] 🚫 TỪ CHỐI NGAY TỪ ĐẦU: User ${userId} đã đạt giới hạn ${taskType} (${currentCount}/${limits[taskType]})`);
+                
+                // XÓA TOKEN NGAY LẬP TỨC để người dùng không thể dùng mã này
+                db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
+                
                 return res.send(`
                     <!DOCTYPE html>
                     <html lang="vi">
@@ -327,6 +331,9 @@ app.get('/verify/:token', (req, res) => {
                             h2 { color: #ff9800; font-size: 24px; margin-bottom: 15px; }
                             .limit-box { background: #fff3e0; padding: 15px; border-radius: 12px; margin: 20px 0; }
                             .limit-count { font-size: 36px; font-weight: bold; color: #ff9800; }
+                            .limit-label { font-size: 14px; color: #e67e22; }
+                            p { color: #7f8c8d; font-size: 14px; line-height: 1.6; margin-bottom: 10px; }
+                            .btn { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #667eea; color: white; text-decoration: none; border-radius: 10px; }
                         </style>
                     </head>
                     <body>
@@ -334,13 +341,16 @@ app.get('/verify/:token', (req, res) => {
                             <div class="icon">📊⏳</div>
                             <h2>BẠN ĐÃ ĐẠT GIỚI HẠN NHIỆM VỤ HÔM NAY</h2>
                             <div class="limit-box">
-                                <div>Cổng <strong>${taskType}</strong></div>
+                                <div class="limit-label">Cổng</div>
+                                <div class="limit-count"><strong>${taskType}</strong></div>
+                                <div class="limit-label">lần/ngày</div>
                                 <div class="limit-count">${currentCount}/${limits[taskType]}</div>
-                                <div>lần/ngày</div>
                             </div>
                             <p>📅 Hôm nay: ${currentDateTime.split(' ')[0]}</p>
-                            <p>✨ Vui lòng quay lại từ <strong>6:00 sáng</strong> hôm sau!</p>
-                            <a href="https://t.me/Vuotlinkcaytienbot" style="display: inline-block; margin-top: 20px; padding: 10px 20px; background: #667eea; color: white; text-decoration: none; border-radius: 10px;">🤖 Quay lại Bot</a>
+                            <p>🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸</p>
+                            <p>✨ Vui lòng quay lại từ <strong>6:00 sáng</strong> hôm sau! ✨</p>
+                            <p>🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸</p>
+                            <a href="https://t.me/Vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
                         </div>
                     </body>
                     </html>
@@ -356,6 +366,9 @@ app.get('/verify/:token', (req, res) => {
                 if (ipUserCount >= 2) {
                     console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipUserCount + 1}`);
                     notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (${ipUserCount + 1}/2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipUserCount} tài khoản khác trong ngày`);
+                    
+                    // XÓA TOKEN NGAY LẬP TỨC
+                    db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
                     
                     return res.send(`
                         <!DOCTYPE html>
