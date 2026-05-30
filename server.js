@@ -179,6 +179,34 @@ app.post('/api/create-token', (req, res) => {
         });
 });
 
+// 🆕 API KIỂM TRA TOKEN (THÊM MỚI - SỬA LỖI MÃ KHÔNG KHỚP)
+app.post('/api/check-token', (req, res) => {
+    const { secret_key, token, user_id } = req.body;
+    
+    if (secret_key !== "MY_SUPER_SECRET_PASSPHRASE_123") {
+        return res.status(403).json({ error: "Sai Secret Key" });
+    }
+    
+    if (!token || !user_id) {
+        return res.status(400).json({ error: "Thiếu thông tin" });
+    }
+    
+    db.get(`SELECT * FROM active_tokens WHERE token = ? AND user_id = ?`, [token, String(user_id)], (err, row) => {
+        if (err || !row) {
+            return res.json({ valid: false });
+        }
+        
+        // Xóa token sau khi kiểm tra để tránh dùng lại
+        db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
+        
+        res.json({ 
+            valid: true, 
+            task_type: row.task_type,
+            user_id: row.user_id
+        });
+    });
+});
+
 // Kiểm tra thời gian làm nhiệm vụ (6H - 24H theo giờ Việt Nam)
 function isWithinTaskTime() {
     const hour = getVietnamHour();
