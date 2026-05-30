@@ -86,7 +86,7 @@ function notifyAdmin(message) {
         .catch(err => console.error('Lỗi gửi thông báo admin:', err));
 }
 
-// Kiểm tra giới hạn nhiệm vụ theo ngày
+// Kiểm tra giới hạn nhiệm vụ theo ngày - SỬA LỖI: Kiểm tra đúng theo user_id (KHÔNG gộp IP)
 function checkDailyLimit(user_id, ip, task_type, callback) {
     const today = getVietnamDate();
     const limits = {
@@ -107,14 +107,18 @@ function checkDailyLimit(user_id, ip, task_type, callback) {
         return;
     }
     
-    db.get(`SELECT SUM(count) as total FROM daily_task_limit 
-            WHERE (user_id = ? OR ip = ?) AND task_type = ? AND task_date = ?`,
-            [user_id, ip, task_type, today], (err, row) => {
+    // SỬA: Chỉ kiểm tra theo user_id, KHÔNG gộp theo IP để tránh đếm sai
+    db.get(`SELECT COUNT(*) as total FROM daily_task_limit 
+            WHERE user_id = ? AND task_type = ? AND task_date = ?`,
+            [user_id, task_type, today], (err, row) => {
         if (err) {
+            console.error('Lỗi checkDailyLimit:', err);
             callback(err, true, limit.reward);
             return;
         }
         const currentCount = row?.total || 0;
+        console.log(`[CHECK LIMIT] User: ${user_id}, Task: ${task_type}, Current: ${currentCount}, Max: ${limit.max}`);
+        
         if (currentCount >= limit.max) {
             callback(null, false, limit.reward, limit.max, currentCount);
         } else {
@@ -126,8 +130,30 @@ function checkDailyLimit(user_id, ip, task_type, callback) {
 // Cập nhật giới hạn nhiệm vụ
 function updateDailyLimit(user_id, ip, task_type) {
     const today = getVietnamDate();
+    
+    // SỬA: Thêm bản ghi mới mỗi lần (không gộp)
     db.run(`INSERT INTO daily_task_limit (user_id, ip, task_type, task_date) 
-            VALUES (?, ?, ?, ?)`, [user_id, ip, task_type, today]);
+            VALUES (?, ?, ?, ?)`, [user_id, ip, task_type, today], (err) => {
+        if (err) {
+            console.error('Lỗi updateDailyLimit:', err);
+        } else {
+            console.log(`[UPDATE LIMIT] User: ${user_id}, Task: ${task_type}, IP: ${ip}, Date: ${today}`);
+        }
+    });
+}
+
+// Kiểm tra IP đã dùng cho bao nhiêu user trong ngày (chống clone)
+function checkIpUsage(ip, current_user_id, callback) {
+    const today = getVietnamDate();
+    db.get(`SELECT COUNT(DISTINCT user_id) as user_count FROM daily_task_limit 
+            WHERE ip = ? AND task_date = ? AND user_id != ?`,
+            [ip, today, current_user_id], (err, row) => {
+        if (err) {
+            callback(err, 0);
+        } else {
+            callback(null, row?.user_count || 0);
+        }
+    });
 }
 
 // API tạo token
@@ -237,7 +263,7 @@ app.get('/verify/:token', (req, res) => {
                         <h2>PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2>
                         <p>Mã liên kết đã hết hiệu lực (tối đa 30 phút)</p>
                         <p>🕐 Thời gian hiện tại: ${currentDateTime}</p>
-                        <a href="https://t.me/vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
+                        <a href="https://t.me/Vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
                     </div>
                 </body>
                 </html>
@@ -250,14 +276,15 @@ app.get('/verify/:token', (req, res) => {
         
         console.log(`[${currentDateTime}] Xử lý token cho User: ${userId} | Task: ${taskType} | IP: ${userIP}`);
         
-        // Kiểm tra IP trùng - NGƯỠNG 2 TÀI KHOẢN
-        db.get(`SELECT COUNT(DISTINCT user_id) as count FROM ip_logs 
-                WHERE ip = ? AND accessed_at >= datetime('now', '-1 day') AND user_id != ?`,
-                [userIP, userId], (err, ipCheck) => {
+        // Bước 1: Kiểm tra IP đã dùng cho bao nhiêu user (chống clone - giới hạn 2 user/IP)
+        checkIpUsage(userIP, userId, (err, ipUserCount) => {
+            if (err) {
+                console.error('Lỗi checkIpUsage:', err);
+            }
             
-            if (ipCheck && ipCheck.count >= 2) {
-                console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipCheck.count}`);
-                notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipCheck.count} tài khoản khác trong ngày`);
+            if (ipUserCount >= 2) {
+                console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipUserCount + 1}`);
+                notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (${ipUserCount + 1}/2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipUserCount} tài khoản khác trong ngày`);
                 
                 return res.send(`
                     <!DOCTYPE html>
@@ -282,7 +309,7 @@ app.get('/verify/:token', (req, res) => {
                             <h2>BẠN KHÔNG THỂ NHẬP KEY VÌ TRÙNG IP</h2>
                             <div class="warning">
                                 <strong>⚠️ CẢNH BÁO HỆ THỐNG ⚠️</strong><br>
-                                IP của bạn đã phục vụ ${ipCheck.count}/2 tài khoản trong ngày
+                                IP của bạn đã phục vụ ${ipUserCount + 1}/2 tài khoản trong ngày
                             </div>
                             <p>🌐 IP: ${userIP}</p>
                             <p>⏰ Thời gian: ${currentDateTime}</p>
@@ -293,13 +320,14 @@ app.get('/verify/:token', (req, res) => {
                 `);
             }
             
-            // Kiểm tra giới hạn nhiệm vụ trong ngày
+            // Bước 2: Kiểm tra giới hạn nhiệm vụ theo user_id
             checkDailyLimit(userId, userIP, taskType, (err, allowed, reward, maxCount, currentCount) => {
+                const limits = {
+                    'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
+                };
+                
                 if (!allowed) {
-                    const limits = {
-                        'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
-                    };
-                    console.log(`[${currentDateTime}] Từ chối: User ${userId} đã đạt giới hạn ${taskType} (${currentCount}/${limits[taskType]})`);
+                    console.log(`[${currentDateTime}] TỪ CHỐI: User ${userId} đã đạt giới hạn ${taskType} (${currentCount}/${limits[taskType]})`);
                     return res.send(`
                         <!DOCTYPE html>
                         <html lang="vi">
@@ -334,12 +362,13 @@ app.get('/verify/:token', (req, res) => {
                     `);
                 }
                 
-                // Ghi log và cập nhật giới hạn
-                db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
-                        [userIP, userId, userAgent, taskType]);
+                // Bước 3: Ghi nhận thành công - cập nhật limit và log IP
                 updateDailyLimit(userId, userIP, taskType);
                 
-                console.log(`[${currentDateTime}] THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${reward}Đ`);
+                db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
+                        [userIP, userId, userAgent, taskType]);
+                
+                console.log(`[${currentDateTime}] ✅ THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${reward}Đ | IP: ${userIP}`);
                 
                 res.send(`
                     <!DOCTYPE html>
