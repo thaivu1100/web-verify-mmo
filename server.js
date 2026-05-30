@@ -166,7 +166,8 @@ app.post('/api/create-token', (req, res) => {
         return res.status(400).json({ error: "Thiếu thông tin" });
     }
     
-    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-30 minutes')`);
+    // Tăng thời gian token lên 60 phút thay vì 30 phút
+    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-60 minutes')`);
     
     db.run(`INSERT OR REPLACE INTO active_tokens (token, user_id, task_type) VALUES (?, ?, ?)`, 
         [token, String(user_id), task_type], (err) => {
@@ -189,13 +190,13 @@ app.post('/api/check-token', (req, res) => {
         return res.status(400).json({ error: "Thiếu thông tin" });
     }
     
+    // KHÔNG XÓA TOKEN NGAY, chỉ kiểm tra tồn tại
     db.get(`SELECT * FROM active_tokens WHERE token = ? AND user_id = ?`, [token, String(user_id)], (err, row) => {
         if (err || !row) {
             return res.json({ valid: false });
         }
         
-        db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
-        
+        // Vẫn giữ token để web verify có thể hiển thị
         res.json({ 
             valid: true, 
             task_type: row.task_type,
@@ -260,7 +261,8 @@ app.get('/verify/:token', (req, res) => {
         `);
     }
     
-    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-30 minutes')`);
+    // Xóa token cũ quá 60 phút
+    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-60 minutes')`);
     
     db.get(`SELECT * FROM active_tokens WHERE token = ?`, [token], (err, row) => {
         if (err || !row) {
@@ -286,7 +288,7 @@ app.get('/verify/:token', (req, res) => {
                     <div class="container">
                         <div class="icon">❌⌛</div>
                         <h2>PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2>
-                        <p>Mã liên kết đã hết hiệu lực (tối đa 30 phút)</p>
+                        <p>Mã liên kết đã hết hiệu lực (tối đa 60 phút)</p>
                         <p>🕐 Thời gian hiện tại: ${currentDateTime}</p>
                         <a href="https://t.me/Vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
                     </div>
@@ -396,6 +398,9 @@ app.get('/verify/:token', (req, res) => {
                         [userIP, userId, userAgent, taskType]);
                 
                 console.log(`[${currentDateTime}] ✅ THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${reward}Đ | IP: ${userIP}`);
+                
+                // KHÔNG XÓA TOKEN NGAY - giữ lại để bot check vẫn thấy hợp lệ
+                // Token sẽ tự động xóa sau 60 phút
                 
                 res.send(`
                     <!DOCTYPE html>
@@ -567,7 +572,7 @@ app.get('/verify/:token', (req, res) => {
                             <div class="key-title">🔑 MÃ XÁC MINH CỦA BẠN:</div>
                             <div class="key-container">
                                 <div class="key-text" id="keyText">${tokenValue}</div>
-                                <button class="copy-btn" onclick="copyKeyAndDelete()">📋 COPY MÃ</button>
+                                <button class="copy-btn" onclick="copyKey()">📋 COPY MÃ</button>
                             </div>
                             
                             <div class="footer-info">
@@ -578,23 +583,10 @@ app.get('/verify/:token', (req, res) => {
                             </div>
                         </div>
                         <script>
-                            let tokenDeleted = false;
-                            
-                            function deleteToken() {
-                                if (tokenDeleted) return;
-                                tokenDeleted = true;
-                                fetch('/api/delete-token', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ token: '${tokenValue}' })
-                                }).catch(err => console.log('Lỗi xóa token:', err));
-                            }
-                            
-                            function copyKeyAndDelete() {
+                            function copyKey() {
                                 const keyText = document.getElementById("keyText").innerText;
                                 navigator.clipboard.writeText(keyText).then(() => {
                                     alert("✅ Đã sao chép mã thành công!\\n\\n👉 Quay lại Bot Telegram và dán mã để nhận tiền thưởng!");
-                                    deleteToken();
                                 }).catch(() => {
                                     const textarea = document.createElement("textarea");
                                     textarea.value = keyText;
@@ -603,13 +595,8 @@ app.get('/verify/:token', (req, res) => {
                                     document.execCommand("copy");
                                     document.body.removeChild(textarea);
                                     alert("✅ Đã sao chép mã thành công!\\n\\n👉 Quay lại Bot Telegram và dán mã để nhận tiền thưởng!");
-                                    deleteToken();
                                 });
                             }
-                            
-                            setTimeout(function() {
-                                deleteToken();
-                            }, 300000);
                         </script>
                     </body>
                     </html>
@@ -619,7 +606,7 @@ app.get('/verify/:token', (req, res) => {
     });
 });
 
-// API xóa token sau khi người dùng đã copy mã
+// API xóa token (chỉ dùng khi cần)
 app.post('/api/delete-token', (req, res) => {
     const { token } = req.body;
     if (token) {
