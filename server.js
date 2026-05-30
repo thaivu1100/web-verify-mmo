@@ -86,8 +86,8 @@ function notifyAdmin(message) {
         .catch(err => console.error('Lỗi gửi thông báo admin:', err));
 }
 
-// Kiểm tra giới hạn nhiệm vụ theo ngày - SỬA LỖI: Kiểm tra đúng theo user_id (KHÔNG gộp IP)
-function checkDailyLimit(user_id, ip, task_type, callback) {
+// Kiểm tra giới hạn nhiệm vụ theo ngày
+function checkDailyLimit(user_id, task_type, callback) {
     const today = getVietnamDate();
     const limits = {
         'LINK4M': { max: 1, reward: 300 },
@@ -103,11 +103,10 @@ function checkDailyLimit(user_id, ip, task_type, callback) {
     
     const limit = limits[task_type];
     if (!limit) {
-        callback(null, true, 300);
+        callback(null, true, 300, 0, 0);
         return;
     }
     
-    // SỬA: Chỉ kiểm tra theo user_id, KHÔNG gộp theo IP để tránh đếm sai
     db.get(`SELECT COUNT(*) as total FROM daily_task_limit 
             WHERE user_id = ? AND task_type = ? AND task_date = ?`,
             [user_id, task_type, today], (err, row) => {
@@ -131,7 +130,6 @@ function checkDailyLimit(user_id, ip, task_type, callback) {
 function updateDailyLimit(user_id, ip, task_type) {
     const today = getVietnamDate();
     
-    // SỬA: Thêm bản ghi mới mỗi lần (không gộp)
     db.run(`INSERT INTO daily_task_limit (user_id, ip, task_type, task_date) 
             VALUES (?, ?, ?, ?)`, [user_id, ip, task_type, today], (err) => {
         if (err) {
@@ -179,7 +177,7 @@ app.post('/api/create-token', (req, res) => {
         });
 });
 
-// 🆕 API KIỂM TRA TOKEN (THÊM MỚI - SỬA LỖI MÃ KHÔNG KHỚP)
+// API KIỂM TRA TOKEN
 app.post('/api/check-token', (req, res) => {
     const { secret_key, token, user_id } = req.body;
     
@@ -196,7 +194,6 @@ app.post('/api/check-token', (req, res) => {
             return res.json({ valid: false });
         }
         
-        // Xóa token sau khi kiểm tra để tránh dùng lại
         db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
         
         res.json({ 
@@ -213,7 +210,7 @@ function isWithinTaskTime() {
     return hour >= 6 && hour < 24;
 }
 
-// Trang xác minh
+// Trang xác minh - 🔧 SỬA LỖI: Kiểm tra giới hạn NGAY TỪ ĐẦU
 app.get('/verify/:token', (req, res) => {
     const token = req.params.token;
     const userIP = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
@@ -304,93 +301,95 @@ app.get('/verify/:token', (req, res) => {
         
         console.log(`[${currentDateTime}] Xử lý token cho User: ${userId} | Task: ${taskType} | IP: ${userIP}`);
         
-        // Bước 1: Kiểm tra IP đã dùng cho bao nhiêu user (chống clone - giới hạn 2 user/IP)
-        checkIpUsage(userIP, userId, (err, ipUserCount) => {
-            if (err) {
-                console.error('Lỗi checkIpUsage:', err);
-            }
+        // 🔧 SỬA LỖI: KIỂM TRA GIỚI HẠN NGAY TỪ ĐẦU TRƯỚC KHI XỬ LÝ
+        checkDailyLimit(userId, taskType, (err, allowed, reward, maxCount, currentCount) => {
+            const limits = {
+                'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
+            };
             
-            if (ipUserCount >= 2) {
-                console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipUserCount + 1}`);
-                notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (${ipUserCount + 1}/2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipUserCount} tài khoản khác trong ngày`);
-                
+            // Nếu đã đạt giới hạn, KHÔNG cho vào web - trả về trang lỗi ngay
+            if (!allowed) {
+                console.log(`[${currentDateTime}] TỪ CHỐI NGAY TỪ ĐẦU: User ${userId} đã đạt giới hạn ${taskType} (${currentCount}/${limits[taskType]})`);
                 return res.send(`
                     <!DOCTYPE html>
                     <html lang="vi">
                     <head>
                         <meta charset="UTF-8">
                         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                        <title>CẢNH BÁO GIAN LẬN</title>
+                        <title>GIỚI HẠN NHIỆM VỤ</title>
                         <style>
                             * { margin: 0; padding: 0; box-sizing: border-box; }
-                            body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #ff4757 0%, #c0392b 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
+                            body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
                             .container { background: #ffffff; padding: 40px 25px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2); text-align: center; max-width: 450px; width: 100%; }
                             .icon { font-size: 70px; margin-bottom: 20px; }
-                            h2 { color: #c0392b; font-size: 24px; margin-bottom: 15px; }
-                            p { color: #7f8c8d; font-size: 14px; line-height: 1.6; margin-bottom: 10px; }
-                            .warning { background: #ffeaa7; padding: 15px; border-radius: 12px; margin: 20px 0; color: #d63031; }
+                            h2 { color: #ff9800; font-size: 24px; margin-bottom: 15px; }
+                            .limit-box { background: #fff3e0; padding: 15px; border-radius: 12px; margin: 20px 0; }
+                            .limit-count { font-size: 36px; font-weight: bold; color: #ff9800; }
                         </style>
                     </head>
                     <body>
                         <div class="container">
-                            <div class="icon">🚫⚠️</div>
-                            <h2>BẠN KHÔNG THỂ NHẬP KEY VÌ TRÙNG IP</h2>
-                            <div class="warning">
-                                <strong>⚠️ CẢNH BÁO HỆ THỐNG ⚠️</strong><br>
-                                IP của bạn đã phục vụ ${ipUserCount + 1}/2 tài khoản trong ngày
+                            <div class="icon">📊⏳</div>
+                            <h2>BẠN ĐÃ ĐẠT GIỚI HẠN NHIỆM VỤ HÔM NAY</h2>
+                            <div class="limit-box">
+                                <div>Cổng <strong>${taskType}</strong></div>
+                                <div class="limit-count">${currentCount}/${limits[taskType]}</div>
+                                <div>lần/ngày</div>
                             </div>
-                            <p>🌐 IP: ${userIP}</p>
-                            <p>⏰ Thời gian: ${currentDateTime}</p>
-                            <p>🛡️ Thông tin đã được ghi nhận và báo cáo Admin!</p>
+                            <p>📅 Hôm nay: ${currentDateTime.split(' ')[0]}</p>
+                            <p>✨ Vui lòng quay lại từ <strong>6:00 sáng</strong> hôm sau!</p>
+                            <a href="https://t.me/Vuotlinkcaytienbot" style="display: inline-block; margin-top: 20px; padding: 10px 20px; background: #667eea; color: white; text-decoration: none; border-radius: 10px;">🤖 Quay lại Bot</a>
                         </div>
                     </body>
                     </html>
                 `);
             }
             
-            // Bước 2: Kiểm tra giới hạn nhiệm vụ theo user_id
-            checkDailyLimit(userId, userIP, taskType, (err, allowed, reward, maxCount, currentCount) => {
-                const limits = {
-                    'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
-                };
+            // Bước 1: Kiểm tra IP đã dùng cho bao nhiêu user (chống clone - giới hạn 2 user/IP)
+            checkIpUsage(userIP, userId, (err, ipUserCount) => {
+                if (err) {
+                    console.error('Lỗi checkIpUsage:', err);
+                }
                 
-                if (!allowed) {
-                    console.log(`[${currentDateTime}] TỪ CHỐI: User ${userId} đã đạt giới hạn ${taskType} (${currentCount}/${limits[taskType]})`);
+                if (ipUserCount >= 2) {
+                    console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipUserCount + 1}`);
+                    notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (${ipUserCount + 1}/2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipUserCount} tài khoản khác trong ngày`);
+                    
                     return res.send(`
                         <!DOCTYPE html>
                         <html lang="vi">
                         <head>
                             <meta charset="UTF-8">
                             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                            <title>GIỚI HẠN NHIỆM VỤ</title>
+                            <title>CẢNH BÁO GIAN LẬN</title>
                             <style>
                                 * { margin: 0; padding: 0; box-sizing: border-box; }
-                                body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
+                                body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #ff4757 0%, #c0392b 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
                                 .container { background: #ffffff; padding: 40px 25px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2); text-align: center; max-width: 450px; width: 100%; }
                                 .icon { font-size: 70px; margin-bottom: 20px; }
-                                h2 { color: #ff9800; font-size: 24px; margin-bottom: 15px; }
-                                .limit-box { background: #fff3e0; padding: 15px; border-radius: 12px; margin: 20px 0; }
-                                .limit-count { font-size: 36px; font-weight: bold; color: #ff9800; }
+                                h2 { color: #c0392b; font-size: 24px; margin-bottom: 15px; }
+                                p { color: #7f8c8d; font-size: 14px; line-height: 1.6; margin-bottom: 10px; }
+                                .warning { background: #ffeaa7; padding: 15px; border-radius: 12px; margin: 20px 0; color: #d63031; }
                             </style>
                         </head>
                         <body>
                             <div class="container">
-                                <div class="icon">📊⏳</div>
-                                <h2>BẠN ĐÃ ĐẠT GIỚI HẠN NHIỆM VỤ HÔM NAY</h2>
-                                <div class="limit-box">
-                                    <div>Cổng <strong>${taskType}</strong></div>
-                                    <div class="limit-count">${currentCount}/${limits[taskType]}</div>
-                                    <div>lần/ngày</div>
+                                <div class="icon">🚫⚠️</div>
+                                <h2>BẠN KHÔNG THỂ NHẬP KEY VÌ TRÙNG IP</h2>
+                                <div class="warning">
+                                    <strong>⚠️ CẢNH BÁO HỆ THỐNG ⚠️</strong><br>
+                                    IP của bạn đã phục vụ ${ipUserCount + 1}/2 tài khoản trong ngày
                                 </div>
-                                <p>📅 Hôm nay: ${currentDateTime.split(' ')[0]}</p>
-                                <p>✨ Vui lòng quay lại từ <strong>6:00 sáng</strong> hôm sau!</p>
+                                <p>🌐 IP: ${userIP}</p>
+                                <p>⏰ Thời gian: ${currentDateTime}</p>
+                                <p>🛡️ Thông tin đã được ghi nhận và báo cáo Admin!</p>
                             </div>
                         </body>
                         </html>
                     `);
                 }
                 
-                // Bước 3: Ghi nhận thành công - cập nhật limit và log IP
+                // Bước 2: Ghi nhận thành công - cập nhật limit và log IP
                 updateDailyLimit(userId, userIP, taskType);
                 
                 db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
