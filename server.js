@@ -11,6 +11,10 @@ const DB_PATH = path.join(__dirname, 'system.db');
 // ADMIN ID
 const ADMIN_ID = 6327666718;
 
+// Bot API URL để kiểm tra giới hạn (Flask API chạy cùng bot)
+const BOT_API_URL = 'https://web-verify-mmo.onrender.com'; // Thay bằng URL thật của bot
+// HOẶC nếu bot chạy cùng server thì dùng: const BOT_API_URL = 'http://localhost:5000';
+
 // Lấy giờ Việt Nam (UTC+7)
 function getVietnamTime() {
     const now = new Date();
@@ -86,47 +90,45 @@ function notifyAdmin(message) {
         .catch(err => console.error('Lỗi gửi thông báo admin:', err));
 }
 
-// Kiểm tra giới hạn nhiệm vụ theo ngày
-function checkDailyLimit(user_id, task_type, callback) {
-    const today = getVietnamDate();
-    const limits = {
-        'LINK4M': { max: 1, reward: 300 },
-        'SITE2S': { max: 2, reward: 300 },
-        'YEUMONEY': { max: 3, reward: 300 },
-        'BBMKTS': { max: 1, reward: 300 },
-        'LAYMA': { max: 4, reward: 400 },
-        'NHAPMA': { max: 4, reward: 500 },
-        'TAPLAYMA': { max: 4, reward: 500 },
-        'LINK2M': { max: 2, reward: 300 },
-        'SHRINKME': { max: 1, reward: 50 }
-    };
-    
-    const limit = limits[task_type];
-    if (!limit) {
-        callback(null, true, 300, 0, 0);
-        return;
+// HÀM KIỂM TRA GIỚI HẠN TỪ BOT API (QUAN TRỌNG: DÙNG CHUNG DB VỚI BOT)
+async function checkDailyLimitFromBot(user_id, task_type) {
+    const fetch = require('node-fetch');
+    try {
+        const response = await fetch(`${BOT_API_URL}/api/bot/check-limit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                secret_key: 'MY_SUPER_SECRET_PASSPHRASE_123',
+                user_id: user_id,
+                task_type: task_type
+            })
+        });
+        const data = await response.json();
+        console.log(`[CHECK LIMIT FROM BOT] User: ${user_id}, Task: ${task_type}, Current: ${data.current_count}, Max: ${data.daily_limit}, Reached: ${data.is_limit_reached}`);
+        return {
+            allowed: !data.is_limit_reached,
+            currentCount: data.current_count,
+            dailyLimit: data.daily_limit,
+            reward: 300 // Sẽ lấy từ API_SHORTENERS trong bot
+        };
+    } catch (error) {
+        console.error('Lỗi gọi API bot check limit:', error);
+        // Fallback: cho phép tạm thời (tránh lỗi server)
+        return { allowed: true, currentCount: 0, dailyLimit: 999, reward: 300 };
     }
-    
-    db.get(`SELECT COUNT(*) as total FROM daily_task_limit 
-            WHERE user_id = ? AND task_type = ? AND task_date = ?`,
-            [user_id, task_type, today], (err, row) => {
-        if (err) {
-            console.error('Lỗi checkDailyLimit:', err);
-            callback(err, true, limit.reward);
-            return;
-        }
-        const currentCount = row?.total || 0;
-        console.log(`[CHECK LIMIT] User: ${user_id}, Task: ${task_type}, Current: ${currentCount}, Max: ${limit.max}`);
-        
-        if (currentCount >= limit.max) {
-            callback(null, false, limit.reward, limit.max, currentCount);
-        } else {
-            callback(null, true, limit.reward);
-        }
+}
+
+// Kiểm tra giới hạn nhiệm vụ theo ngày (GỌI TỪ BOT API)
+function checkDailyLimit(user_id, task_type, callback) {
+    checkDailyLimitFromBot(user_id, task_type).then(result => {
+        callback(null, result.allowed, result.reward, result.dailyLimit, result.currentCount);
+    }).catch(err => {
+        console.error('Lỗi checkDailyLimit:', err);
+        callback(err, true, 300);
     });
 }
 
-// Cập nhật giới hạn nhiệm vụ
+// Cập nhật giới hạn nhiệm vụ (vẫn giữ local để tránh gọi API nhiều)
 function updateDailyLimit(user_id, ip, task_type) {
     const today = getVietnamDate();
     
@@ -211,8 +213,8 @@ function isWithinTaskTime() {
     return hour >= 6 && hour < 24;
 }
 
-// Trang xác minh - KIỂM TRA GIỚI HẠN NGAY TỪ ĐẦU
-app.get('/verify/:token', (req, res) => {
+// Trang xác minh - KIỂM TRA GIỚI HẠN TỪ BOT API
+app.get('/verify/:token', async (req, res) => {
     const token = req.params.token;
     const userIP = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
     const userAgent = req.headers['user-agent'] || 'Unknown';
@@ -264,7 +266,7 @@ app.get('/verify/:token', (req, res) => {
     // Xóa token cũ quá 60 phút
     db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-60 minutes')`);
     
-    db.get(`SELECT * FROM active_tokens WHERE token = ?`, [token], (err, row) => {
+    db.get(`SELECT * FROM active_tokens WHERE token = ?`, [token], async (err, row) => {
         if (err || !row) {
             console.log(`[${currentDateTime}] Token không hợp lệ hoặc đã hết hạn: ${token.substring(0, 10)}...`);
             return res.send(`
@@ -290,7 +292,7 @@ app.get('/verify/:token', (req, res) => {
                         <h2>PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2>
                         <p>Mã liên kết đã hết hiệu lực (tối đa 60 phút)</p>
                         <p>🕐 Thời gian hiện tại: ${currentDateTime}</p>
-                        <a href="https://t.me/Vuotlinkcaytien1_bot" class="btn">🤖 Quay lại Bot</a>
+                        <a href="https://t.me/Vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
                     </div>
                 </body>
                 </html>
@@ -303,17 +305,67 @@ app.get('/verify/:token', (req, res) => {
         
         console.log(`[${currentDateTime}] Xử lý token cho User: ${userId} | Task: ${taskType} | IP: ${userIP}`);
         
-        // ========== KIỂM TRA GIỚI HẠN NGAY TỪ ĐẦU TRƯỚC KHI XỬ LÝ ==========
-        checkDailyLimit(userId, taskType, (err, allowed, reward, maxCount, currentCount) => {
-            const limits = {
-                'LINK4M': 1, 'SITE2S': 2, 'YEUMONEY': 3, 'BBMKTS': 1, 'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
-            };
+        // ========== KIỂM TRA GIỚI HẠN TỪ BOT API (QUAN TRỌNG: DÙNG CHUNG DB) ==========
+        const limitResult = await checkDailyLimitFromBot(userId, taskType);
+        
+        if (limitResult.is_limit_reached) {
+            console.log(`[${currentDateTime}] 🚫 TỪ CHỐI NGAY TỪ ĐẦU: User ${userId} đã đạt giới hạn ${taskType} (${limitResult.currentCount}/${limitResult.dailyLimit})`);
             
-            // Nếu đã đạt giới hạn, KHÔNG cho vào web - KHÔNG HIỂN THỊ MÃ KEY
-            if (!allowed) {
-                console.log(`[${currentDateTime}] 🚫 TỪ CHỐI NGAY TỪ ĐẦU: User ${userId} đã đạt giới hạn ${taskType} (${currentCount}/${limits[taskType]})`);
+            // XÓA TOKEN NGAY LẬP TỨC
+            db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
+            
+            return res.send(`
+                <!DOCTYPE html>
+                <html lang="vi">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>GIỚI HẠN NHIỆM VỤ</title>
+                    <style>
+                        * { margin: 0; padding: 0; box-sizing: border-box; }
+                        body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
+                        .container { background: #ffffff; padding: 40px 25px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2); text-align: center; max-width: 450px; width: 100%; }
+                        .icon { font-size: 70px; margin-bottom: 20px; }
+                        h2 { color: #ff9800; font-size: 24px; margin-bottom: 15px; }
+                        .limit-box { background: #fff3e0; padding: 15px; border-radius: 12px; margin: 20px 0; }
+                        .limit-count { font-size: 36px; font-weight: bold; color: #ff9800; }
+                        .limit-label { font-size: 14px; color: #e67e22; }
+                        p { color: #7f8c8d; font-size: 14px; line-height: 1.6; margin-bottom: 10px; }
+                        .btn { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #667eea; color: white; text-decoration: none; border-radius: 10px; }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <div class="icon">📊⏳</div>
+                        <h2>BẠN ĐÃ ĐẠT GIỚI HẠN NHIỆM VỤ HÔM NAY</h2>
+                        <div class="limit-box">
+                            <div class="limit-label">Cổng</div>
+                            <div class="limit-count"><strong>${taskType}</strong></div>
+                            <div class="limit-label">lần/ngày</div>
+                            <div class="limit-count">${limitResult.currentCount}/${limitResult.dailyLimit}</div>
+                        </div>
+                        <p>📅 Hôm nay: ${currentDateTime.split(' ')[0]}</p>
+                        <p>🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸</p>
+                        <p>✨ Vui lòng quay lại từ <strong>6:00 sáng</strong> hôm sau! ✨</p>
+                        <p>🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸</p>
+                        <a href="https://t.me/Vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
+                    </div>
+                </body>
+                </html>
+            `);
+        }
+        
+        // Kiểm tra IP đã dùng cho bao nhiêu user (chống clone - giới hạn 2 user/IP)
+        checkIpUsage(userIP, userId, (err, ipUserCount) => {
+            if (err) {
+                console.error('Lỗi checkIpUsage:', err);
+            }
+            
+            if (ipUserCount >= 2) {
+                console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipUserCount + 1}`);
+                notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (${ipUserCount + 1}/2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipUserCount} tài khoản khác trong ngày`);
                 
-                // XÓA TOKEN NGAY LẬP TỨC để người dùng không thể dùng mã này
+                // XÓA TOKEN NGAY LẬP TỨC
                 db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
                 
                 return res.send(`
@@ -322,299 +374,244 @@ app.get('/verify/:token', (req, res) => {
                     <head>
                         <meta charset="UTF-8">
                         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                        <title>GIỚI HẠN NHIỆM VỤ</title>
+                        <title>CẢNH BÁO GIAN LẬN</title>
                         <style>
                             * { margin: 0; padding: 0; box-sizing: border-box; }
-                            body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
+                            body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #ff4757 0%, #c0392b 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
                             .container { background: #ffffff; padding: 40px 25px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2); text-align: center; max-width: 450px; width: 100%; }
                             .icon { font-size: 70px; margin-bottom: 20px; }
-                            h2 { color: #ff9800; font-size: 24px; margin-bottom: 15px; }
-                            .limit-box { background: #fff3e0; padding: 15px; border-radius: 12px; margin: 20px 0; }
-                            .limit-count { font-size: 36px; font-weight: bold; color: #ff9800; }
-                            .limit-label { font-size: 14px; color: #e67e22; }
+                            h2 { color: #c0392b; font-size: 24px; margin-bottom: 15px; }
                             p { color: #7f8c8d; font-size: 14px; line-height: 1.6; margin-bottom: 10px; }
-                            .btn { display: inline-block; margin-top: 20px; padding: 12px 24px; background: #667eea; color: white; text-decoration: none; border-radius: 10px; }
+                            .warning { background: #ffeaa7; padding: 15px; border-radius: 12px; margin: 20px 0; color: #d63031; }
                         </style>
                     </head>
                     <body>
                         <div class="container">
-                            <div class="icon">📊⏳</div>
-                            <h2>BẠN ĐÃ ĐẠT GIỚI HẠN NHIỆM VỤ HÔM NAY</h2>
-                            <div class="limit-box">
-                                <div class="limit-label">Cổng</div>
-                                <div class="limit-count"><strong>${taskType}</strong></div>
-                                <div class="limit-label">lần/ngày</div>
-                                <div class="limit-count">${currentCount}/${limits[taskType]}</div>
+                            <div class="icon">🚫⚠️</div>
+                            <h2>BẠN KHÔNG THỂ NHẬP KEY VÌ TRÙNG IP</h2>
+                            <div class="warning">
+                                <strong>⚠️ CẢNH BÁO HỆ THỐNG ⚠️</strong><br>
+                                IP của bạn đã phục vụ ${ipUserCount + 1}/2 tài khoản trong ngày
                             </div>
-                            <p>📅 Hôm nay: ${currentDateTime.split(' ')[0]}</p>
-                            <p>🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸</p>
-                            <p>✨ Vui lòng quay lại từ <strong>6:00 sáng</strong> hôm sau! ✨</p>
-                            <p>🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸🌸</p>
-                            <a href="https://t.me/Vuotlinkcaytienbot" class="btn">🤖 Quay lại Bot</a>
+                            <p>🌐 IP: ${userIP}</p>
+                            <p>⏰ Thời gian: ${currentDateTime}</p>
+                            <p>🛡️ Thông tin đã được ghi nhận và báo cáo Admin!</p>
                         </div>
                     </body>
                     </html>
                 `);
             }
             
-            // Kiểm tra IP đã dùng cho bao nhiêu user (chống clone - giới hạn 2 user/IP)
-            checkIpUsage(userIP, userId, (err, ipUserCount) => {
-                if (err) {
-                    console.error('Lỗi checkIpUsage:', err);
-                }
-                
-                if (ipUserCount >= 2) {
-                    console.log(`[${currentDateTime}] 🚨 CẢNH BÁO TRÙNG IP! User: ${userId} | IP: ${userIP} | Số tài khoản: ${ipUserCount + 1}`);
-                    notifyAdmin(`🚨 CẢNH BÁO TRÙNG IP (${ipUserCount + 1}/2 TK)!\nUser ID: ${userId}\nIP: ${userIP}\nThiết bị: ${userAgent.substring(0, 50)}\nThời gian: ${currentDateTime}\nLý do: IP đã phục vụ ${ipUserCount} tài khoản khác trong ngày`);
-                    
-                    // XÓA TOKEN NGAY LẬP TỨC
-                    db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
-                    
-                    return res.send(`
-                        <!DOCTYPE html>
-                        <html lang="vi">
-                        <head>
-                            <meta charset="UTF-8">
-                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                            <title>CẢNH BÁO GIAN LẬN</title>
-                            <style>
-                                * { margin: 0; padding: 0; box-sizing: border-box; }
-                                body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #ff4757 0%, #c0392b 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
-                                .container { background: #ffffff; padding: 40px 25px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2); text-align: center; max-width: 450px; width: 100%; }
-                                .icon { font-size: 70px; margin-bottom: 20px; }
-                                h2 { color: #c0392b; font-size: 24px; margin-bottom: 15px; }
-                                p { color: #7f8c8d; font-size: 14px; line-height: 1.6; margin-bottom: 10px; }
-                                .warning { background: #ffeaa7; padding: 15px; border-radius: 12px; margin: 20px 0; color: #d63031; }
-                            </style>
-                        </head>
-                        <body>
-                            <div class="container">
-                                <div class="icon">🚫⚠️</div>
-                                <h2>BẠN KHÔNG THỂ NHẬP KEY VÌ TRÙNG IP</h2>
-                                <div class="warning">
-                                    <strong>⚠️ CẢNH BÁO HỆ THỐNG ⚠️</strong><br>
-                                    IP của bạn đã phục vụ ${ipUserCount + 1}/2 tài khoản trong ngày
-                                </div>
-                                <p>🌐 IP: ${userIP}</p>
-                                <p>⏰ Thời gian: ${currentDateTime}</p>
-                                <p>🛡️ Thông tin đã được ghi nhận và báo cáo Admin!</p>
-                            </div>
-                        </body>
-                        </html>
-                    `);
-                }
-                
-                // Ghi nhận thành công - cập nhật limit và log IP
-                updateDailyLimit(userId, userIP, taskType);
-                
-                db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
-                        [userIP, userId, userAgent, taskType]);
-                
-                console.log(`[${currentDateTime}] ✅ THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${reward}Đ | IP: ${userIP}`);
-                
-                // KHÔNG XÓA TOKEN NGAY - giữ lại để bot check vẫn thấy hợp lệ
-                // Token sẽ tự động xóa sau 60 phút
-                
-                res.send(`
-                    <!DOCTYPE html>
-                    <html lang="vi">
-                    <head>
-                        <meta charset="UTF-8">
-                        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-                        <title>🎉 XÁC MINH THÀNH CÔNG - NHẬN THƯỞNG NGAY!</title>
-                        <style>
-                            * { margin: 0; padding: 0; box-sizing: border-box; }
-                            body { 
-                                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-                                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                                display: flex; 
-                                justify-content: center; 
-                                align-items: center; 
-                                min-height: 100vh; 
-                                padding: 15px; 
-                            }
-                            .container { 
-                                background: #ffffff; 
-                                padding: 30px 25px; 
-                                border-radius: 28px; 
-                                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); 
-                                text-align: center; 
-                                max-width: 520px; 
-                                width: 100%; 
-                                animation: slideUp 0.5s ease;
-                            }
-                            @keyframes slideUp {
-                                from { opacity: 0; transform: translateY(30px); }
-                                to { opacity: 1; transform: translateY(0); }
-                            }
-                            .icon-success { 
-                                font-size: 75px; 
-                                margin-bottom: 15px; 
-                                animation: bounce 0.6s ease; 
-                            }
-                            @keyframes bounce { 
-                                0%, 100% { transform: translateY(0); } 
-                                50% { transform: translateY(-12px); } 
-                            }
-                            h2 { color: #2ed573; font-size: 28px; margin-bottom: 8px; font-weight: 700; }
-                            .subtitle { color: #7f8c8d; font-size: 14px; margin-bottom: 20px; }
-                            .reward-box { 
-                                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                                padding: 18px; 
-                                border-radius: 20px; 
-                                margin-bottom: 25px;
-                                box-shadow: 0 10px 20px rgba(0,0,0,0.1);
-                            }
-                            .reward-box span { 
-                                color: #ffd700; 
-                                font-size: 36px; 
-                                font-weight: bold; 
-                                display: block; 
-                                text-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                            }
-                            .reward-box small { color: rgba(255,255,255,0.9); font-size: 13px; }
-                            .task-name {
-                                background: #f0f0f0;
-                                padding: 8px 16px;
-                                border-radius: 50px;
-                                display: inline-block;
-                                margin-bottom: 20px;
-                                font-weight: bold;
-                                color: #667eea;
-                            }
-                            .key-title { 
-                                font-size: 12px; 
-                                font-weight: bold; 
-                                color: #57606f; 
-                                text-transform: uppercase; 
-                                text-align: left; 
-                                margin-bottom: 8px; 
-                                letter-spacing: 1px;
-                            }
-                            .key-container { 
-                                display: flex; 
-                                align-items: center; 
-                                background: #f8f9fa; 
-                                border: 2px solid #2ed573; 
-                                padding: 12px 15px; 
-                                border-radius: 16px; 
-                                margin-bottom: 25px;
-                                transition: all 0.3s;
-                            }
-                            .key-container:hover {
-                                box-shadow: 0 5px 15px rgba(46, 213, 115, 0.2);
-                            }
-                            .key-text { 
-                                font-family: 'Courier New', monospace; 
-                                font-size: 13px; 
-                                font-weight: bold; 
-                                color: #ff4757; 
-                                flex: 1; 
-                                text-align: left; 
-                                overflow-x: auto; 
-                                word-break: break-all;
-                                background: #fff;
-                                padding: 8px 12px;
-                                border-radius: 10px;
-                            }
-                            .copy-btn { 
-                                background: linear-gradient(135deg, #2ed573 0%, #26af5f 100%);
-                                color: white; 
-                                border: none; 
-                                padding: 10px 20px; 
-                                font-size: 13px; 
-                                font-weight: bold; 
-                                border-radius: 12px; 
-                                cursor: pointer; 
-                                transition: 0.2s; 
-                                margin-left: 12px;
-                                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                            }
-                            .copy-btn:hover { 
-                                transform: scale(1.03); 
-                                box-shadow: 0 5px 15px rgba(46, 213, 115, 0.3);
-                            }
-                            .copy-btn:active { transform: scale(0.98); }
-                            .footer-info { 
-                                font-size: 11px; 
-                                color: #a4b0be; 
-                                border-top: 1px solid #f1f2f6; 
-                                padding-top: 18px; 
-                                text-align: left; 
-                                line-height: 1.7;
-                                background: #fafbfc;
-                                border-radius: 12px;
-                                padding: 15px;
-                            }
-                            .instruction {
-                                background: #e8f8f5;
-                                padding: 12px;
-                                border-radius: 12px;
-                                margin: 20px 0;
-                                font-size: 13px;
-                                color: #27ae60;
-                            }
-                            @media (max-width: 480px) {
-                                .container { padding: 25px 18px; }
-                                .key-container { flex-direction: column; gap: 10px; }
-                                .copy-btn { margin-left: 0; width: 100%; }
-                                .key-text { width: 100%; text-align: center; }
-                            }
-                        </style>
-                    </head>
-                    <body>
-                        <div class="container">
-                            <div class="icon-success">🎉✨🏆</div>
-                            <h2>VƯỢT LINK THÀNH CÔNG!</h2>
-                            <div class="subtitle">Chúc mừng bạn đã hoàn thành nhiệm vụ</div>
-                            
-                            <div class="task-name">📌 ${taskType}</div>
-                            
-                            <div class="reward-box">
-                                <span>+${reward.toLocaleString()} ₫</span>
-                                <small>Đã được cộng vào tài khoản của bạn</small>
-                            </div>
-                            
-                            <div class="instruction">
-                                📋 <strong>HƯỚNG DẪN NHẬN THƯỞNG:</strong><br>
-                                1️⃣ Nhấn nút COPY bên dưới<br>
-                                2️⃣ Quay lại Telegram Bot<br>
-                                3️⃣ Dán mã vào khung chat để nhận tiền!
-                            </div>
-                            
-                            <div class="key-title">🔑 MÃ XÁC MINH CỦA BẠN:</div>
-                            <div class="key-container">
-                                <div class="key-text" id="keyText">${tokenValue}</div>
-                                <button class="copy-btn" onclick="copyKey()">📋 COPY MÃ</button>
-                            </div>
-                            
-                            <div class="footer-info">
-                                🌐 <strong>IP:</strong> ${userIP}<br>
-                                📱 <strong>Thiết bị:</strong> ${userAgent.substring(0, 45)}${userAgent.length > 45 ? '...' : ''}<br>
-                                ⏰ <strong>Thời gian:</strong> ${currentDateTime}<br>
-                                🛡️ <strong>Trạng thái:</strong> Đã xác minh thành công
-                            </div>
+            // Ghi nhận thành công - cập nhật limit và log IP
+            updateDailyLimit(userId, userIP, taskType);
+            
+            db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
+                    [userIP, userId, userAgent, taskType]);
+            
+            console.log(`[${currentDateTime}] ✅ THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${limitResult.reward || 300}Đ | IP: ${userIP}`);
+            
+            // KHÔNG XÓA TOKEN NGAY - giữ lại để bot check vẫn thấy hợp lệ
+            // Token sẽ tự động xóa sau 60 phút
+            
+            res.send(`
+                <!DOCTYPE html>
+                <html lang="vi">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+                    <title>🎉 XÁC MINH THÀNH CÔNG - NHẬN THƯỞNG NGAY!</title>
+                    <style>
+                        * { margin: 0; padding: 0; box-sizing: border-box; }
+                        body { 
+                            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                            display: flex; 
+                            justify-content: center; 
+                            align-items: center; 
+                            min-height: 100vh; 
+                            padding: 15px; 
+                        }
+                        .container { 
+                            background: #ffffff; 
+                            padding: 30px 25px; 
+                            border-radius: 28px; 
+                            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); 
+                            text-align: center; 
+                            max-width: 520px; 
+                            width: 100%; 
+                            animation: slideUp 0.5s ease;
+                        }
+                        @keyframes slideUp {
+                            from { opacity: 0; transform: translateY(30px); }
+                            to { opacity: 1; transform: translateY(0); }
+                        }
+                        .icon-success { 
+                            font-size: 75px; 
+                            margin-bottom: 15px; 
+                            animation: bounce 0.6s ease; 
+                        }
+                        @keyframes bounce { 
+                            0%, 100% { transform: translateY(0); } 
+                            50% { transform: translateY(-12px); } 
+                        }
+                        h2 { color: #2ed573; font-size: 28px; margin-bottom: 8px; font-weight: 700; }
+                        .subtitle { color: #7f8c8d; font-size: 14px; margin-bottom: 20px; }
+                        .reward-box { 
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                            padding: 18px; 
+                            border-radius: 20px; 
+                            margin-bottom: 25px;
+                            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+                        }
+                        .reward-box span { 
+                            color: #ffd700; 
+                            font-size: 36px; 
+                            font-weight: bold; 
+                            display: block; 
+                            text-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                        }
+                        .reward-box small { color: rgba(255,255,255,0.9); font-size: 13px; }
+                        .task-name {
+                            background: #f0f0f0;
+                            padding: 8px 16px;
+                            border-radius: 50px;
+                            display: inline-block;
+                            margin-bottom: 20px;
+                            font-weight: bold;
+                            color: #667eea;
+                        }
+                        .key-title { 
+                            font-size: 12px; 
+                            font-weight: bold; 
+                            color: #57606f; 
+                            text-transform: uppercase; 
+                            text-align: left; 
+                            margin-bottom: 8px; 
+                            letter-spacing: 1px;
+                        }
+                        .key-container { 
+                            display: flex; 
+                            align-items: center; 
+                            background: #f8f9fa; 
+                            border: 2px solid #2ed573; 
+                            padding: 12px 15px; 
+                            border-radius: 16px; 
+                            margin-bottom: 25px;
+                            transition: all 0.3s;
+                        }
+                        .key-container:hover {
+                            box-shadow: 0 5px 15px rgba(46, 213, 115, 0.2);
+                        }
+                        .key-text { 
+                            font-family: 'Courier New', monospace; 
+                            font-size: 13px; 
+                            font-weight: bold; 
+                            color: #ff4757; 
+                            flex: 1; 
+                            text-align: left; 
+                            overflow-x: auto; 
+                            word-break: break-all;
+                            background: #fff;
+                            padding: 8px 12px;
+                            border-radius: 10px;
+                        }
+                        .copy-btn { 
+                            background: linear-gradient(135deg, #2ed573 0%, #26af5f 100%);
+                            color: white; 
+                            border: none; 
+                            padding: 10px 20px; 
+                            font-size: 13px; 
+                            font-weight: bold; 
+                            border-radius: 12px; 
+                            cursor: pointer; 
+                            transition: 0.2s; 
+                            margin-left: 12px;
+                            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                        }
+                        .copy-btn:hover { 
+                            transform: scale(1.03); 
+                            box-shadow: 0 5px 15px rgba(46, 213, 115, 0.3);
+                        }
+                        .copy-btn:active { transform: scale(0.98); }
+                        .footer-info { 
+                            font-size: 11px; 
+                            color: #a4b0be; 
+                            border-top: 1px solid #f1f2f6; 
+                            padding-top: 18px; 
+                            text-align: left; 
+                            line-height: 1.7;
+                            background: #fafbfc;
+                            border-radius: 12px;
+                            padding: 15px;
+                        }
+                        .instruction {
+                            background: #e8f8f5;
+                            padding: 12px;
+                            border-radius: 12px;
+                            margin: 20px 0;
+                            font-size: 13px;
+                            color: #27ae60;
+                        }
+                        @media (max-width: 480px) {
+                            .container { padding: 25px 18px; }
+                            .key-container { flex-direction: column; gap: 10px; }
+                            .copy-btn { margin-left: 0; width: 100%; }
+                            .key-text { width: 100%; text-align: center; }
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <div class="icon-success">🎉✨🏆</div>
+                        <h2>VƯỢT LINK THÀNH CÔNG!</h2>
+                        <div class="subtitle">Chúc mừng bạn đã hoàn thành nhiệm vụ</div>
+                        
+                        <div class="task-name">📌 ${taskType}</div>
+                        
+                        <div class="reward-box">
+                            <span>+${limitResult.reward || 300} ₫</span>
+                            <small>Đã được cộng vào tài khoản của bạn</small>
                         </div>
-                        <script>
-                            function copyKey() {
-                                const keyText = document.getElementById("keyText").innerText;
-                                navigator.clipboard.writeText(keyText).then(() => {
-                                    alert("✅ Đã sao chép mã thành công!\\n\\n👉 Quay lại Bot Telegram và dán mã để nhận tiền thưởng!");
-                                }).catch(() => {
-                                    const textarea = document.createElement("textarea");
-                                    textarea.value = keyText;
-                                    document.body.appendChild(textarea);
-                                    textarea.select();
-                                    document.execCommand("copy");
-                                    document.body.removeChild(textarea);
-                                    alert("✅ Đã sao chép mã thành công!\\n\\n👉 Quay lại Bot Telegram và dán mã để nhận tiền thưởng!");
-                                });
-                            }
-                        </script>
-                    </body>
-                    </html>
-                `);
-            });
+                        
+                        <div class="instruction">
+                            📋 <strong>HƯỚNG DẪN NHẬN THƯỞNG:</strong><br>
+                            1️⃣ Nhấn nút COPY bên dưới<br>
+                            2️⃣ Quay lại Telegram Bot<br>
+                            3️⃣ Dán mã vào khung chat để nhận tiền!
+                        </div>
+                        
+                        <div class="key-title">🔑 MÃ XÁC MINH CỦA BẠN:</div>
+                        <div class="key-container">
+                            <div class="key-text" id="keyText">${tokenValue}</div>
+                            <button class="copy-btn" onclick="copyKey()">📋 COPY MÃ</button>
+                        </div>
+                        
+                        <div class="footer-info">
+                            🌐 <strong>IP:</strong> ${userIP}<br>
+                            📱 <strong>Thiết bị:</strong> ${userAgent.substring(0, 45)}${userAgent.length > 45 ? '...' : ''}<br>
+                            ⏰ <strong>Thời gian:</strong> ${currentDateTime}<br>
+                            🛡️ <strong>Trạng thái:</strong> Đã xác minh thành công
+                        </div>
+                    </div>
+                    <script>
+                        function copyKey() {
+                            const keyText = document.getElementById("keyText").innerText;
+                            navigator.clipboard.writeText(keyText).then(() => {
+                                alert("✅ Đã sao chép mã thành công!\\n\\n👉 Quay lại Bot Telegram và dán mã để nhận tiền thưởng!");
+                            }).catch(() => {
+                                const textarea = document.createElement("textarea");
+                                textarea.value = keyText;
+                                document.body.appendChild(textarea);
+                                textarea.select();
+                                document.execCommand("copy");
+                                document.body.removeChild(textarea);
+                                alert("✅ Đã sao chép mã thành công!\\n\\n👉 Quay lại Bot Telegram và dán mã để nhận tiền thưởng!");
+                            });
+                        }
+                    </script>
+                </body>
+                </html>
+            `);
         });
     });
 });
