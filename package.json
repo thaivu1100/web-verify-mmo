@@ -8,7 +8,8 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "sqlite3": "^5.1.7"
+    "sqlite3": "^5.1.7",
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=18.0.0"
