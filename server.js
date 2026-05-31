@@ -1,22 +1,68 @@
 // Hệ thống Web Verify MMO - Bảo mật tối đa - Chống trùng IP 100%
+// GIẢI PHÁP: Lưu token vào RAM (Map), không dùng SQLite để tránh lỗi ghi/xóa
 
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_PATH = path.join(__dirname, 'system.db');
 
 // ADMIN ID
 const ADMIN_ID = 6327666718;
 
+// Lưu token trong RAM (Map) – tự động xóa sau 120 phút
+const activeTokens = new Map(); // key: token, value: { user_id, task_type, ip, fingerprint, createdAt }
+
+// Lưu blacklist IP và fingerprint (dùng file để tồn tại qua restart)
+const BLACKLIST_FILE = path.join(__dirname, 'blacklist.json');
+let ipBlacklist = new Set(); // lưu ip
+let fingerprintBlacklist = new Set();
+
+// Đọc blacklist từ file nếu có
+if (fs.existsSync(BLACKLIST_FILE)) {
+    try {
+        const data = JSON.parse(fs.readFileSync(BLACKLIST_FILE, 'utf8'));
+        ipBlacklist = new Set(data.ipBlacklist || []);
+        fingerprintBlacklist = new Set(data.fingerprintBlacklist || []);
+        console.log('✅ Đã tải blacklist từ file');
+    } catch(e) {}
+}
+
+// Ghi blacklist vào file
+function saveBlacklist() {
+    fs.writeFileSync(BLACKLIST_FILE, JSON.stringify({
+        ipBlacklist: Array.from(ipBlacklist),
+        fingerprintBlacklist: Array.from(fingerprintBlacklist)
+    }, null, 2));
+}
+
+// Thêm vào blacklist
+function addToBlacklist(ip, fingerprint, reason) {
+    if (ip && ip !== '0.0.0.0') ipBlacklist.add(ip);
+    if (fingerprint) fingerprintBlacklist.add(fingerprint);
+    saveBlacklist();
+    console.log(`[BLACKLIST] Đã thêm IP ${ip}, FP ${fingerprint} vì: ${reason}`);
+    notifyAdmin(`🚨 ĐÃ THÊM BLACKLIST!\nIP: ${ip}\nFingerprint: ${fingerprint}\nLý do: ${reason}\nThời gian: ${getVietnamDateTime()}`);
+}
+
+// Hàm xóa token cũ (chạy mỗi giờ)
+function cleanExpiredTokens() {
+    const now = Date.now();
+    for (const [token, data] of activeTokens.entries()) {
+        if (now - data.createdAt > 120 * 60 * 1000) { // 120 phút
+            activeTokens.delete(token);
+        }
+    }
+    console.log(`[CLEAN] Đã xóa token cũ. Còn ${activeTokens.size} token hoạt động.`);
+}
+setInterval(cleanExpiredTokens, 60 * 60 * 1000); // mỗi giờ
+
 // Lấy giờ Việt Nam (UTC+7)
 function getVietnamTime() {
     const now = new Date();
-    const vietnamTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
-    return vietnamTime;
+    return new Date(now.getTime() + 7 * 60 * 60 * 1000);
 }
 
 function getVietnamDate() {
@@ -39,8 +85,7 @@ function getVietnamDateTime() {
 }
 
 function getVietnamHour() {
-    const vietnamTime = getVietnamTime();
-    return vietnamTime.getUTCHours();
+    return getVietnamTime().getUTCHours();
 }
 
 // Lấy IP thật - chống spoofing
@@ -86,48 +131,37 @@ function generateDeviceFingerprint(req) {
     return crypto.createHash('sha256').update(fingerprintData).digest('hex').substring(0, 32);
 }
 
-const db = new sqlite3.Database(DB_PATH);
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS active_tokens (
-        token TEXT PRIMARY KEY,
-        user_id TEXT,
-        task_type TEXT,
-        ip TEXT,
-        fingerprint TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-    db.run(`CREATE TABLE IF NOT EXISTS ip_blacklist (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ip TEXT,
-        fingerprint TEXT,
-        reason TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-    db.run(`CREATE TABLE IF NOT EXISTS ip_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ip TEXT,
-        user_id TEXT,
-        user_agent TEXT,
-        task_type TEXT,
-        accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-    db.run(`CREATE TABLE IF NOT EXISTS daily_task_limit (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        ip TEXT,
-        fingerprint TEXT,
-        task_type TEXT,
-        task_date TEXT,
-        UNIQUE(user_id, task_type, task_date)
-    )`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_daily_task_limit_ip_date ON daily_task_limit(ip, task_date)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_daily_task_limit_fingerprint ON daily_task_limit(fingerprint)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_active_tokens_created ON active_tokens(created_at)`);
-    console.log('✅ Cơ sở dữ liệu đã sẵn sàng');
-});
+// Lưu daily task limit (dùng Map trong RAM, có thể dùng file nếu cần)
+const dailyTaskLimit = new Map(); // key: `${user_id}|${task_type}|${date}`, value: count
 
-app.set('trust proxy', true);
-app.use(express.json());
+function checkDailyLimit(user_id, task_type) {
+    const today = getVietnamDate();
+    const key = `${user_id}|${task_type}|${today}`;
+    const count = dailyTaskLimit.get(key) || 0;
+    const limits = {
+        'LINK4M': 1, 'YEUMONEY': 3, 'SITE2S': 2, 'BBMKTS': 1,
+        'LAYMA': 4, 'NHAPMA': 4, 'TAPLAYMA': 4, 'LINK2M': 2, 'SHRINKME': 1
+    };
+    const max = limits[task_type] || 999;
+    return { count, max, reached: count >= max };
+}
+
+function incrementDailyLimit(user_id, task_type) {
+    const today = getVietnamDate();
+    const key = `${user_id}|${task_type}|${today}`;
+    const current = dailyTaskLimit.get(key) || 0;
+    dailyTaskLimit.set(key, current + 1);
+}
+
+// Lấy reward theo task_type
+function getRewardByTaskType(task_type) {
+    const rewards = {
+        'LINK4M': 300, 'YEUMONEY': 300, 'SITE2S': 300,
+        'BBMKTS': 300, 'LAYMA': 400, 'NHAPMA': 500,
+        'TAPLAYMA': 500, 'LINK2M': 300, 'SHRINKME': 50
+    };
+    return rewards[task_type] || 300;
+}
 
 function notifyAdmin(message) {
     const fetch = require('node-fetch');
@@ -136,83 +170,15 @@ function notifyAdmin(message) {
         .catch(err => console.error('Lỗi gửi thông báo admin:', err));
 }
 
-// Lấy đúng reward theo task_type (đồng bộ với bot)
-function getRewardByTaskType(task_type) {
-    const rewards = {
-        'LINK4M': 300,
-        'YEUMONEY': 300,
-        'SITE2S': 300,
-        'BBMKTS': 300,
-        'LAYMA': 400,
-        'NHAPMA': 500,
-        'TAPLAYMA': 500,
-        'LINK2M': 300,
-        'SHRINKME': 50
-    };
-    return rewards[task_type] || 300;
+function isWithinTaskTime() {
+    const hour = getVietnamHour();
+    return hour >= 6 && hour < 24;
 }
 
-// KHÔNG gọi API bot, luôn cho phép (chạy độc lập)
-async function checkDailyLimitFromBot(user_id, task_type) {
-    const reward = getRewardByTaskType(task_type);
-    return { allowed: true, currentCount: 0, dailyLimit: 999, reward: reward };
-}
+app.set('trust proxy', true);
+app.use(express.json());
 
-function isIPBlacklisted(ip, fingerprint, callback) {
-    db.get(`SELECT COUNT(*) as count FROM ip_blacklist WHERE ip = ? OR fingerprint = ?`, 
-        [ip, fingerprint], (err, row) => {
-        callback(null, row ? row.count > 0 : false);
-    });
-}
-
-function addToBlacklist(ip, fingerprint, reason) {
-    db.run(`INSERT INTO ip_blacklist (ip, fingerprint, reason) VALUES (?, ?, ?)`, 
-        [ip, fingerprint, reason], (err) => {
-        if (!err) {
-            console.log(`[BLACKLIST] Đã thêm IP ${ip} vào blacklist vì: ${reason}`);
-            notifyAdmin(`🚨 ĐÃ THÊM BLACKLIST!\nIP: ${ip}\nFingerprint: ${fingerprint}\nLý do: ${reason}\nThời gian: ${getVietnamDateTime()}`);
-        }
-    });
-}
-
-function checkIpAdvancedUsage(ip, fingerprint, current_user_id, callback) {
-    const today = getVietnamDate();
-    
-    db.get(`SELECT COUNT(DISTINCT user_id) as user_count FROM daily_task_limit 
-            WHERE ip = ? AND task_date = ? AND user_id != ?`,
-            [ip, today, current_user_id], (err, row) => {
-        if (err) return callback(err, false);
-        const userCount = row ? row.user_count : 0;
-        if (userCount >= 1) {
-            return callback(null, false, `IP ${ip} đã được sử dụng bởi ${userCount + 1} tài khoản khác. Chỉ được 1 tài khoản/IP!`);
-        }
-        
-        db.get(`SELECT COUNT(*) as fp_count FROM daily_task_limit 
-                WHERE fingerprint = ? AND task_date = ? AND ip != ?`,
-                [fingerprint, today, ip], (err, fpRow) => {
-            if (err) return callback(err, false);
-            const fpCount = fpRow ? fpRow.fp_count : 0;
-            if (fpCount >= 1) {
-                addToBlacklist(ip, fingerprint, `Fingerprint trùng lặp từ IP khác`);
-                return callback(null, false, `Phát hiện hành vi gian lận! Thiết bị của bạn đã được ghi nhận.`);
-            }
-            
-            db.get(`SELECT COUNT(*) as request_count FROM active_tokens 
-                    WHERE ip = ? AND created_at > datetime('now', '-1 hour')`,
-                    [ip], (err, reqRow) => {
-                if (err) return callback(err, false);
-                const requestCount = reqRow ? reqRow.request_count : 0;
-                if (requestCount >= 5) {
-                    addToBlacklist(ip, fingerprint, `Quá nhiều request: ${requestCount} lần/giờ`);
-                    return callback(null, false, `Bạn đã thực hiện quá nhiều request! Vui lòng đợi 1 giờ.`);
-                }
-                callback(null, true);
-            });
-        });
-    });
-}
-
-// API tạo token
+// API tạo token – LƯU VÀO RAM
 app.post('/api/create-token', (req, res) => {
     const { secret_key, user_id, task_type, token } = req.body;
     const clientIP = getRealIP(req);
@@ -225,24 +191,25 @@ app.post('/api/create-token', (req, res) => {
         return res.status(400).json({ error: "Thiếu thông tin" });
     }
     
-    isIPBlacklisted(clientIP, fingerprint, (err, isBlacklisted) => {
-        if (isBlacklisted) {
-            return res.status(403).json({ error: "IP của bạn đã bị khóa vĩnh viễn!" });
-        }
-        
-        // Xóa token quá 120 phút
-        db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-120 minutes')`);
-        db.run(`INSERT OR REPLACE INTO active_tokens (token, user_id, task_type, ip, fingerprint, created_at) 
-                VALUES (?, ?, ?, ?, ?, datetime('now'))`, 
-            [token, String(user_id), task_type, clientIP, fingerprint], (err) => {
-                if (err) return res.status(500).json({ error: "Lỗi ghi token" });
-                console.log(`[CREATE TOKEN] Token: ${token.substring(0, 10)}..., User: ${user_id}, Task: ${task_type}, IP: ${clientIP}`);
-                res.json({ status: "success" });
-            });
+    // Kiểm tra blacklist
+    if (ipBlacklist.has(clientIP) || fingerprintBlacklist.has(fingerprint)) {
+        return res.status(403).json({ error: "IP của bạn đã bị khóa vĩnh viễn!" });
+    }
+    
+    // Lưu token vào RAM
+    activeTokens.set(token, {
+        user_id: String(user_id),
+        task_type,
+        ip: clientIP,
+        fingerprint,
+        createdAt: Date.now()
     });
+    
+    console.log(`[CREATE TOKEN] Token: ${token.substring(0, 10)}..., User: ${user_id}, Task: ${task_type}, IP: ${clientIP}`);
+    res.json({ status: "success" });
 });
 
-// API kiểm tra token - KHÔNG XÓA TOKEN
+// API kiểm tra token – KHÔNG XÓA TOKEN
 app.post('/api/check-token', (req, res) => {
     const { secret_key, token, user_id } = req.body;
     const clientIP = getRealIP(req);
@@ -255,26 +222,28 @@ app.post('/api/check-token', (req, res) => {
         return res.status(400).json({ error: "Thiếu thông tin" });
     }
     
-    db.get(`SELECT * FROM active_tokens WHERE token = ? AND user_id = ?`, 
-        [token, String(user_id)], (err, row) => {
-        if (err || !row) {
-            return res.json({ valid: false });
-        }
-        if (row.ip !== clientIP) {
-            addToBlacklist(clientIP, fingerprint, `IP không khớp khi check token`);
-            db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
-            return res.json({ valid: false });
-        }
-        res.json({ valid: true, task_type: row.task_type, user_id: row.user_id });
-    });
+    const tokenData = activeTokens.get(token);
+    if (!tokenData) {
+        return res.json({ valid: false });
+    }
+    
+    // Kiểm tra IP có khớp không
+    if (tokenData.ip !== clientIP) {
+        addToBlacklist(clientIP, fingerprint, `IP không khớp khi check token`);
+        activeTokens.delete(token);
+        return res.json({ valid: false });
+    }
+    
+    // Kiểm tra user_id
+    if (tokenData.user_id !== String(user_id)) {
+        return res.json({ valid: false });
+    }
+    
+    // KHÔNG XÓA TOKEN – giữ để web verify hiển thị
+    res.json({ valid: true, task_type: tokenData.task_type, user_id: tokenData.user_id });
 });
 
-function isWithinTaskTime() {
-    const hour = getVietnamHour();
-    return hour >= 6 && hour < 24;
-}
-
-// Trang xác minh - GIỮ TOKEN, KHÔNG XÓA KHI THÀNH CÔNG
+// Trang xác minh – LẤY TOKEN TỪ RAM
 app.get('/verify/:token', async (req, res) => {
     const token = req.params.token;
     const userIP = getRealIP(req);
@@ -288,68 +257,59 @@ app.get('/verify/:token', async (req, res) => {
         return res.send(`<!DOCTYPE html><html><head><title>HẾT GIỜ</title><style>body{font-family:Arial;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;max-width:450px;}h2{color:#ff4757;}</style></head><body><div class=container><h2>⏰ ĐÃ HẾT GIỜ LÀM VIỆC</h2><p>Thời gian: <strong>6:00 - 24:00</strong></p><p>✨ Vui lòng quay lại từ 6:00 sáng!</p></div></body></html>`);
     }
     
-    isIPBlacklisted(userIP, fingerprint, async (err, isBlacklisted) => {
-        if (isBlacklisted) {
-            return res.send(`<!DOCTYPE html><html><head><title>ĐÃ BỊ KHÓA</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff4757,#c0392b);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#c0392b;}</style></head><body><div class=container><h2>🔒 TÀI KHOẢN ĐÃ BỊ KHÓA</h2><p>Liên hệ Admin để được hỗ trợ.</p></div></body></html>`);
-        }
-        
-        // Chỉ xóa token quá 120 phút, không xóa token hiện tại
-        db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-120 minutes')`);
-        
-        db.get(`SELECT * FROM active_tokens WHERE token = ?`, [token], async (err, row) => {
-            if (err || !row) {
-                return res.send(`<!DOCTYPE html><html><head><title>TOKEN HẾT HẠN</title><style>body{font-family:Arial;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#ff4757;}a{display:inline-block;margin-top:20px;padding:12px24px;background:#667eea;color:#fff;text-decoration:none;border-radius:10px;}</style></head><body><div class=container><h2>❌ PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2><p>Mã đã hết hiệu lực (120 phút)</p><a href="https://t.me/Vuotlinkcaytienbot">🤖 Quay lại Bot</a></div></body></html>`);
-            }
-            
-            const userId = row.user_id;
-            const taskType = row.task_type;
-            const tokenValue = row.token;
-            const rewardAmount = getRewardByTaskType(taskType);
-            
-            if (row.ip !== userIP) {
-                addToBlacklist(userIP, fingerprint, `IP không khớp khi verify`);
-                db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
-                return res.send(`<!DOCTYPE html><html><head><title>IP KHÔNG HỢP LỆ</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff4757,#c0392b);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#c0392b;}</style></head><body><div class=container><h2>🌐 IP KHÔNG HỢP LỆ</h2><p>Bạn phải dùng cùng IP khi tạo link và xác minh!</p></div></body></html>`);
-            }
-            
-            checkIpAdvancedUsage(userIP, fingerprint, userId, async (err, isAllowed, errorMsg) => {
-                if (!isAllowed) {
-                    db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
-                    return res.send(`<!DOCTYPE html><html><head><title>GIỚI HẠN TRUY CẬP</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff9800,#e67e22);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#e67e22;}.error{background:#fff3e0;padding:15px;border-radius:12px;margin:20px0;}</style></head><body><div class=container><h2>⚠️ GIỚI HẠN TRUY CẬP</h2><div class=error>${errorMsg}</div></div></body></html>`);
-                }
-                
-                // Cập nhật giới hạn IP
-                db.run(`INSERT OR REPLACE INTO daily_task_limit (user_id, ip, fingerprint, task_type, task_date) 
-                        VALUES (?, ?, ?, ?, ?)`, [userId, userIP, fingerprint, taskType, getVietnamDate()]);
-                db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
-                    [userIP, userId, userAgent, taskType]);
-                
-                console.log(`[${currentDateTime}] ✅ THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${rewardAmount}Đ`);
-                
-                // KHÔNG XÓA TOKEN – giữ lại để bot kiểm tra (sẽ tự xóa sau 120 phút)
-                res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>🎉 XÁC MINH THÀNH CÔNG!</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;padding:15px;font-family:'Segoe UI',Arial,sans-serif}.container{background:#fff;padding:30px;border-radius:20px;text-align:center;max-width:500px;width:100%}h2{color:#2ed573;font-size:28px;margin-bottom:15px}.reward-box{background:linear-gradient(135deg,#667eea,#764ba2);padding:20px;border-radius:15px;margin:20px 0}.reward-box span{color:#ffd700;font-size:36px;font-weight:bold}.key-box{background:#f0f0f0;padding:15px;border-radius:10px;margin:20px 0;word-break:break-all;font-family:monospace;font-size:14px}.copy-btn{background:#2ed573;color:#fff;border:none;padding:12px 24px;border-radius:10px;cursor:pointer;font-size:16px;font-weight:bold}.copy-btn:hover{background:#26af5f}.warning-box{font-size:11px;color:#888;margin-top:20px;padding:10px;background:#f8f9fa;border-radius:10px}</style></head><body><div class=container><h2>🎉 VƯỢT LINK THÀNH CÔNG!</h2><p>Chúc mừng bạn đã hoàn thành nhiệm vụ <strong>${taskType}</strong></p><div class=reward-box><span>+${rewardAmount} ₫</span></div><div><strong>🔑 MÃ XÁC MINH CỦA BẠN:</strong></div><div class=key-box id="keyText">${tokenValue}</div><button class="copy-btn" onclick="copyKey()">📋 COPY MÃ</button><div class=warning-box>⚠️ Mỗi IP chỉ được sử dụng cho 1 tài khoản duy nhất!<br>📌 Sau khi copy mã, quay lại Bot và dán mã để nhận thưởng!</div></div><script>function copyKey(){const text=document.getElementById("keyText").innerText;navigator.clipboard.writeText(text).then(()=>alert("✅ Đã sao chép mã! Quay lại Bot để nhận thưởng!"));}</script></body></html>`);
-            });
-        });
-    });
+    // Kiểm tra blacklist
+    if (ipBlacklist.has(userIP) || fingerprintBlacklist.has(fingerprint)) {
+        return res.send(`<!DOCTYPE html><html><head><title>ĐÃ BỊ KHÓA</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff4757,#c0392b);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#c0392b;}</style></head><body><div class=container><h2>🔒 TÀI KHOẢN ĐÃ BỊ KHÓA</h2><p>Liên hệ Admin để được hỗ trợ.</p></div></body></html>`);
+    }
+    
+    const tokenData = activeTokens.get(token);
+    if (!tokenData) {
+        return res.send(`<!DOCTYPE html><html><head><title>TOKEN HẾT HẠN</title><style>body{font-family:Arial;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#ff4757;}a{display:inline-block;margin-top:20px;padding:12px24px;background:#667eea;color:#fff;text-decoration:none;border-radius:10px;}</style></head><body><div class=container><h2>❌ PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2><p>Mã đã hết hiệu lực (120 phút)</p><a href="https://t.me/Vuotlinkcaytienbot">🤖 Quay lại Bot</a></div></body></html>`);
+    }
+    
+    const userId = tokenData.user_id;
+    const taskType = tokenData.task_type;
+    const tokenValue = token;
+    const rewardAmount = getRewardByTaskType(taskType);
+    
+    // Kiểm tra IP có khớp với lúc tạo token không
+    if (tokenData.ip !== userIP) {
+        addToBlacklist(userIP, fingerprint, `IP không khớp khi verify`);
+        activeTokens.delete(token);
+        return res.send(`<!DOCTYPE html><html><head><title>IP KHÔNG HỢP LỆ</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff4757,#c0392b);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#c0392b;}</style></head><body><div class=container><h2>🌐 IP KHÔNG HỢP LỆ</h2><p>Bạn phải dùng cùng IP khi tạo link và xác minh!</p></div></body></html>`);
+    }
+    
+    // Kiểm tra giới hạn nhiệm vụ
+    const limit = checkDailyLimit(userId, taskType);
+    if (limit.reached) {
+        activeTokens.delete(token);
+        return res.send(`<!DOCTYPE html><html><head><title>GIỚI HẠN NHIỆM VỤ</title><style>body{font-family:Arial;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#ff9800;}.limit{background:#fff3e0;padding:15px;border-radius:12px;margin:20px0;font-size:36px;font-weight:bold;color:#ff9800;}a{display:inline-block;margin-top:20px;padding:12px24px;background:#667eea;color:#fff;text-decoration:none;border-radius:10px;}</style></head><body><div class=container><h2>📊 BẠN ĐÃ ĐẠT GIỚI HẠN</h2><div class=limit>${limit.count}/${limit.max}</div><p>Cổng <strong>${taskType}</strong></p><a href="https://t.me/Vuotlinkcaytienbot">🤖 Quay lại Bot</a></div></body></html>`);
+    }
+    
+    // Tăng số lần làm task
+    incrementDailyLimit(userId, taskType);
+    
+    // Log IP
+    console.log(`[${currentDateTime}] ✅ THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${rewardAmount}Đ | IP: ${userIP}`);
+    
+    // KHÔNG XÓA TOKEN – giữ lại để bot check (sẽ tự động xóa sau 120 phút)
+    // Nhưng nếu không xóa, người dùng có thể dùng lại token nhiều lần? Không, vì đã tăng limit.
+    
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>🎉 XÁC MINH THÀNH CÔNG!</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;padding:15px;font-family:'Segoe UI',Arial,sans-serif}.container{background:#fff;padding:30px;border-radius:20px;text-align:center;max-width:500px;width:100%}h2{color:#2ed573;font-size:28px;margin-bottom:15px}.reward-box{background:linear-gradient(135deg,#667eea,#764ba2);padding:20px;border-radius:15px;margin:20px 0}.reward-box span{color:#ffd700;font-size:36px;font-weight:bold}.key-box{background:#f0f0f0;padding:15px;border-radius:10px;margin:20px 0;word-break:break-all;font-family:monospace;font-size:14px}.copy-btn{background:#2ed573;color:#fff;border:none;padding:12px 24px;border-radius:10px;cursor:pointer;font-size:16px;font-weight:bold}.copy-btn:hover{background:#26af5f}.warning-box{font-size:11px;color:#888;margin-top:20px;padding:10px;background:#f8f9fa;border-radius:10px}</style></head><body><div class=container><h2>🎉 VƯỢT LINK THÀNH CÔNG!</h2><p>Chúc mừng bạn đã hoàn thành nhiệm vụ <strong>${taskType}</strong></p><div class=reward-box><span>+${rewardAmount} ₫</span></div><div><strong>🔑 MÃ XÁC MINH CỦA BẠN:</strong></div><div class=key-box id="keyText">${tokenValue}</div><button class="copy-btn" onclick="copyKey()">📋 COPY MÃ</button><div class=warning-box>⚠️ Mỗi IP chỉ được sử dụng cho 1 tài khoản duy nhất!<br>📌 Sau khi copy mã, quay lại Bot và dán mã để nhận thưởng!</div></div><script>function copyKey(){const text=document.getElementById("keyText").innerText;navigator.clipboard.writeText(text).then(()=>alert("✅ Đã sao chép mã! Quay lại Bot để nhận thưởng!"));}</script></body></html>`);
 });
 
 app.post('/api/delete-token', (req, res) => {
     const { token } = req.body;
-    if (token) {
-        db.run(`DELETE FROM active_tokens WHERE token = ?`, [token]);
+    if (token && activeTokens.has(token)) {
+        activeTokens.delete(token);
         res.json({ status: "deleted" });
     } else {
-        res.status(400).json({ error: "Thiếu token" });
+        res.status(400).json({ error: "Thiếu token hoặc token không tồn tại" });
     }
 });
 
 app.get('/health', (req, res) => {
-    res.json({ status: 'OK', vietnamTime: getVietnamDateTime() });
+    res.json({ status: 'OK', vietnamTime: getVietnamDateTime(), activeTokens: activeTokens.size });
 });
-
-setInterval(() => {
-    db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-120 minutes')`);
-    db.run(`DELETE FROM ip_logs WHERE accessed_at <= datetime('now', '-1 day')`);
-}, 3600000);
 
 app.listen(PORT, () => console.log(`🚀 Web Server chạy tại cổng ${PORT} | Giờ VN: ${getVietnamDateTime()}`));
