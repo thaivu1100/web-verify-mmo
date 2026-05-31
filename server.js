@@ -43,7 +43,7 @@ function getVietnamHour() {
     return vietnamTime.getUTCHours();
 }
 
-// HÀM LẤY IP THẬT - CHỐNG SPOOFING
+// Lấy IP thật - chống spoofing
 function getRealIP(req) {
     const ipHeaders = [
         'cf-connecting-ip',
@@ -54,22 +54,15 @@ function getRealIP(req) {
         'forwarded-for',
         'forwarded'
     ];
-    
     for (const header of ipHeaders) {
         const ip = req.headers[header];
         if (ip && typeof ip === 'string') {
             const firstIP = ip.split(',')[0].trim();
-            if (isValidIP(firstIP)) {
-                return firstIP;
-            }
+            if (isValidIP(firstIP)) return firstIP;
         }
     }
-    
     const socketIP = req.socket.remoteAddress;
-    if (socketIP && isValidIP(socketIP)) {
-        return socketIP;
-    }
-    
+    if (socketIP && isValidIP(socketIP)) return socketIP;
     return '0.0.0.0';
 }
 
@@ -79,9 +72,7 @@ function isValidIP(ip) {
     const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
     if (ipv4Regex.test(ip)) {
         const parts = ip.split('.');
-        for (const part of parts) {
-            if (parseInt(part) > 255) return false;
-        }
+        for (const part of parts) if (parseInt(part) > 255) return false;
         return true;
     }
     return false;
@@ -161,7 +152,7 @@ function getRewardByTaskType(task_type) {
     return rewards[task_type] || 300;
 }
 
-// Bỏ qua kiểm tra giới hạn từ bot (chạy độc lập)
+// KHÔNG gọi API bot, luôn cho phép (chạy độc lập)
 async function checkDailyLimitFromBot(user_id, task_type) {
     const reward = getRewardByTaskType(task_type);
     return { allowed: true, currentCount: 0, dailyLimit: 999, reward: reward };
@@ -239,6 +230,7 @@ app.post('/api/create-token', (req, res) => {
             return res.status(403).json({ error: "IP của bạn đã bị khóa vĩnh viễn!" });
         }
         
+        // Xóa token quá 120 phút
         db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-120 minutes')`);
         db.run(`INSERT OR REPLACE INTO active_tokens (token, user_id, task_type, ip, fingerprint, created_at) 
                 VALUES (?, ?, ?, ?, ?, datetime('now'))`, 
@@ -282,7 +274,7 @@ function isWithinTaskTime() {
     return hour >= 6 && hour < 24;
 }
 
-// Trang xác minh - GIỮ TOKEN 120 PHÚT
+// Trang xác minh - GIỮ TOKEN, KHÔNG XÓA KHI THÀNH CÔNG
 app.get('/verify/:token', async (req, res) => {
     const token = req.params.token;
     const userIP = getRealIP(req);
@@ -301,7 +293,9 @@ app.get('/verify/:token', async (req, res) => {
             return res.send(`<!DOCTYPE html><html><head><title>ĐÃ BỊ KHÓA</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff4757,#c0392b);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#c0392b;}</style></head><body><div class=container><h2>🔒 TÀI KHOẢN ĐÃ BỊ KHÓA</h2><p>Liên hệ Admin để được hỗ trợ.</p></div></body></html>`);
         }
         
+        // Chỉ xóa token quá 120 phút, không xóa token hiện tại
         db.run(`DELETE FROM active_tokens WHERE created_at <= datetime('now', '-120 minutes')`);
+        
         db.get(`SELECT * FROM active_tokens WHERE token = ?`, [token], async (err, row) => {
             if (err || !row) {
                 return res.send(`<!DOCTYPE html><html><head><title>TOKEN HẾT HẠN</title><style>body{font-family:Arial;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#ff4757;}a{display:inline-block;margin-top:20px;padding:12px24px;background:#667eea;color:#fff;text-decoration:none;border-radius:10px;}</style></head><body><div class=container><h2>❌ PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2><p>Mã đã hết hiệu lực (120 phút)</p><a href="https://t.me/Vuotlinkcaytienbot">🤖 Quay lại Bot</a></div></body></html>`);
@@ -324,6 +318,7 @@ app.get('/verify/:token', async (req, res) => {
                     return res.send(`<!DOCTYPE html><html><head><title>GIỚI HẠN TRUY CẬP</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff9800,#e67e22);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#e67e22;}.error{background:#fff3e0;padding:15px;border-radius:12px;margin:20px0;}</style></head><body><div class=container><h2>⚠️ GIỚI HẠN TRUY CẬP</h2><div class=error>${errorMsg}</div></div></body></html>`);
                 }
                 
+                // Cập nhật giới hạn IP
                 db.run(`INSERT OR REPLACE INTO daily_task_limit (user_id, ip, fingerprint, task_type, task_date) 
                         VALUES (?, ?, ?, ?, ?)`, [userId, userIP, fingerprint, taskType, getVietnamDate()]);
                 db.run(`INSERT INTO ip_logs (ip, user_id, user_agent, task_type) VALUES (?, ?, ?, ?)`, 
@@ -331,6 +326,7 @@ app.get('/verify/:token', async (req, res) => {
                 
                 console.log(`[${currentDateTime}] ✅ THÀNH CÔNG! User: ${userId} | Task: ${taskType} | Thưởng: ${rewardAmount}Đ`);
                 
+                // KHÔNG XÓA TOKEN – giữ lại để bot kiểm tra (sẽ tự xóa sau 120 phút)
                 res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>🎉 XÁC MINH THÀNH CÔNG!</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;padding:15px;font-family:'Segoe UI',Arial,sans-serif}.container{background:#fff;padding:30px;border-radius:20px;text-align:center;max-width:500px;width:100%}h2{color:#2ed573;font-size:28px;margin-bottom:15px}.reward-box{background:linear-gradient(135deg,#667eea,#764ba2);padding:20px;border-radius:15px;margin:20px 0}.reward-box span{color:#ffd700;font-size:36px;font-weight:bold}.key-box{background:#f0f0f0;padding:15px;border-radius:10px;margin:20px 0;word-break:break-all;font-family:monospace;font-size:14px}.copy-btn{background:#2ed573;color:#fff;border:none;padding:12px 24px;border-radius:10px;cursor:pointer;font-size:16px;font-weight:bold}.copy-btn:hover{background:#26af5f}.warning-box{font-size:11px;color:#888;margin-top:20px;padding:10px;background:#f8f9fa;border-radius:10px}</style></head><body><div class=container><h2>🎉 VƯỢT LINK THÀNH CÔNG!</h2><p>Chúc mừng bạn đã hoàn thành nhiệm vụ <strong>${taskType}</strong></p><div class=reward-box><span>+${rewardAmount} ₫</span></div><div><strong>🔑 MÃ XÁC MINH CỦA BẠN:</strong></div><div class=key-box id="keyText">${tokenValue}</div><button class="copy-btn" onclick="copyKey()">📋 COPY MÃ</button><div class=warning-box>⚠️ Mỗi IP chỉ được sử dụng cho 1 tài khoản duy nhất!<br>📌 Sau khi copy mã, quay lại Bot và dán mã để nhận thưởng!</div></div><script>function copyKey(){const text=document.getElementById("keyText").innerText;navigator.clipboard.writeText(text).then(()=>alert("✅ Đã sao chép mã! Quay lại Bot để nhận thưởng!"));}</script></body></html>`);
             });
         });
