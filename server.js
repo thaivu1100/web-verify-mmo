@@ -1,4 +1,4 @@
-// Hệ thống Web Verify MMO - Bảo mật tối đa - Dùng file JSON (đồng bộ tuyệt đối)
+// Hệ thống Web Verify MMO - Bảo mật tối đa - Dùng file JSON + retry khi đọc token
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
@@ -14,10 +14,20 @@ const BLACKLIST_FILE = path.join(__dirname, 'blacklist.json');
 const IP_USAGE_FILE = path.join(__dirname, 'ip_usage.json');
 const LOGS_FILE = path.join(__dirname, 'ip_logs.json');
 
-// Helper đọc/ghi file
-function readJSON(file, def = {}) {
+// Helper đọc/ghi file với retry
+function readJSON(file, def = {}, retries = 3) {
     if (!fs.existsSync(file)) return def;
-    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) { return def; }
+    for (let i = 0; i < retries; i++) {
+        try {
+            const content = fs.readFileSync(file, 'utf8');
+            return JSON.parse(content);
+        } catch(e) {
+            if (i === retries - 1) return def;
+            // chờ một chút rồi thử lại
+            require('fs').readFileSync; // dummy
+        }
+    }
+    return def;
 }
 function writeJSON(file, data) {
     fs.writeFileSync(file, JSON.stringify(data, null, 2));
@@ -56,13 +66,13 @@ function getRewardByTaskType(t) {
     return r[t] || 300;
 }
 
-// Xóa token cũ mỗi giờ
+// Xóa token cũ mỗi giờ (24h thay vì 2h)
 setInterval(() => {
     const tokens = readJSON(TOKENS_FILE);
     const now = Date.now();
     let changed = false;
     for (const [token, data] of Object.entries(tokens)) {
-        if (now - data.createdAt > 120 * 60 * 1000) {
+        if (now - data.createdAt > 24 * 60 * 60 * 1000) {
             delete tokens[token];
             changed = true;
         }
@@ -112,8 +122,8 @@ app.post('/api/check-token', (req, res) => {
     res.json({ valid: true, task_type: tokenData.task_type, user_id: tokenData.user_id });
 });
 
-// Trang xác minh
-app.get('/verify/:token', (req, res) => {
+// Trang xác minh - có retry khi không tìm thấy token
+app.get('/verify/:token', async (req, res) => {
     const token = req.params.token;
     const userIP = getRealIP(req);
     const fingerprint = generateDeviceFingerprint(req);
@@ -133,11 +143,18 @@ app.get('/verify/:token', (req, res) => {
         return res.send(`<!DOCTYPE html><html><head><title>ĐÃ BỊ KHÓA</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff4757,#c0392b);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#c0392b;}</style></head><body><div class=container><h2>🔒 TÀI KHOẢN ĐÃ BỊ KHÓA</h2><p>Liên hệ Admin.</p></div></body></html>`);
     }
 
-    const tokens = readJSON(TOKENS_FILE);
-    const tokenData = tokens[token];
+    // Đọc token với retry (thử lại 3 lần, mỗi lần cách nhau 200ms)
+    let tokenData = null;
+    for (let retry = 0; retry < 3; retry++) {
+        const tokens = readJSON(TOKENS_FILE);
+        tokenData = tokens[token];
+        if (tokenData) break;
+        if (retry < 2) await new Promise(r => setTimeout(r, 200));
+    }
+
     if (!tokenData) {
-        console.log(`[${now}] Token ${token.substring(0,10)} NOT FOUND`);
-        return res.send(`<!DOCTYPE html><html><head><title>TOKEN HẾT HẠN</title><style>body{font-family:Arial;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#ff4757;}a{display:inline-block;margin-top:20px;padding:12px24px;background:#667eea;color:#fff;text-decoration:none;border-radius:10px;}</style></head><body><div class=container><h2>❌ PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2><p>Mã đã hết hiệu lực (120 phút).</p><p>Vui lòng quay lại Bot và thử lại nhiệm vụ.</p><a href="https://t.me/Vuotlinkcaytienbot">🤖 Quay lại Bot</a></div></body></html>`);
+        console.log(`[${now}] Token ${token.substring(0,10)} NOT FOUND after retry`);
+        return res.send(`<!DOCTYPE html><html><head><title>TOKEN HẾT HẠN</title><style>body{font-family:Arial;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#ff4757;}a{display:inline-block;margin-top:20px;padding:12px24px;background:#667eea;color:#fff;text-decoration:none;border-radius:10px;}</style></head><body><div class=container><h2>❌ PHIÊN XÁC MINH KHÔNG TỒN TẠI</h2><p>Mã đã hết hiệu lực (24h).</p><p>Vui lòng quay lại Bot và thử lại nhiệm vụ.</p><a href="https://t.me/Vuotlinkcaytienbot">🤖 Quay lại Bot</a></div></body></html>`);
     }
 
     const userId = tokenData.user_id;
@@ -148,6 +165,8 @@ app.get('/verify/:token', (req, res) => {
     if (tokenData.ip !== userIP) {
         blacklist[userIP] = { reason: `IP không khớp (token IP: ${tokenData.ip})`, time: now };
         writeJSON(BLACKLIST_FILE, blacklist);
+        // xóa token khỏi file
+        const tokens = readJSON(TOKENS_FILE);
         delete tokens[token];
         writeJSON(TOKENS_FILE, tokens);
         return res.send(`<!DOCTYPE html><html><head><title>IP KHÔNG HỢP LỆ</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff4757,#c0392b);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#c0392b;}</style></head><body><div class=container><h2>🌐 IP KHÔNG HỢP LỆ</h2><p>Bạn phải dùng cùng IP khi tạo link và xác minh!</p></div></body></html>`);
@@ -159,6 +178,7 @@ app.get('/verify/:token', (req, res) => {
     if (ipUsage[userIP] && ipUsage[userIP].date === today && ipUsage[userIP].user_id !== userId) {
         blacklist[userIP] = { reason: `IP đã dùng cho user ${ipUsage[userIP].user_id} khác`, time: now };
         writeJSON(BLACKLIST_FILE, blacklist);
+        const tokens = readJSON(TOKENS_FILE);
         delete tokens[token];
         writeJSON(TOKENS_FILE, tokens);
         return res.send(`<!DOCTYPE html><html><head><title>TRÙNG IP</title><style>body{font-family:Arial;background:linear-gradient(135deg,#ff4757,#c0392b);display:flex;justify-content:center;align-items:center;min-height:100vh;}.container{background:#fff;padding:40px;border-radius:20px;text-align:center;}h2{color:#c0392b;}.warning{background:#ffeaa7;padding:15px;border-radius:12px;margin:20px0;}</style></head><body><div class=container><h2>🚫 IP ĐÃ ĐƯỢC SỬ DỤNG</h2><div class=warning>IP ${userIP} đã được sử dụng bởi tài khoản khác trong ngày hôm nay!<br>Mỗi IP chỉ được dùng cho 1 tài khoản duy nhất.</div><p>⏰ ${now}</p><a href="https://t.me/Vuotlinkcaytienbot">🤖 Quay lại Bot</a></div></body></html>`);
@@ -174,7 +194,7 @@ app.get('/verify/:token', (req, res) => {
 
     console.log(`[${now}] ✅ SUCCESS User ${userId} Task ${taskType} +${getRewardByTaskType(taskType)}Đ IP ${userIP}`);
 
-    // KHÔNG XÓA TOKEN – giữ lại cho bot check
+    // KHÔNG XÓA TOKEN – giữ lại cho bot check (tự xóa sau 24h)
     res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>🎉 XÁC MINH THÀNH CÔNG!</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:linear-gradient(135deg,#667eea,#764ba2);display:flex;justify-content:center;align-items:center;min-height:100vh;padding:15px;font-family:'Segoe UI',Arial,sans-serif}.container{background:#fff;padding:30px;border-radius:20px;text-align:center;max-width:500px;width:100%}h2{color:#2ed573;font-size:28px;margin-bottom:15px}.reward-box{background:linear-gradient(135deg,#667eea,#764ba2);padding:20px;border-radius:15px;margin:20px 0}.reward-box span{color:#ffd700;font-size:36px;font-weight:bold}.key-box{background:#f0f0f0;padding:15px;border-radius:10px;margin:20px 0;word-break:break-all;font-family:monospace;font-size:14px}.copy-btn{background:#2ed573;color:#fff;border:none;padding:12px24px;border-radius:10px;cursor:pointer;font-size:16px;font-weight:bold}.copy-btn:hover{background:#26af5f}.warning-box{font-size:11px;color:#888;margin-top:20px;padding:10px;background:#f8f9fa;border-radius:10px}</style></head><body><div class=container><h2>🎉 VƯỢT LINK THÀNH CÔNG!</h2><p>Chúc mừng bạn đã hoàn thành nhiệm vụ <strong>${taskType}</strong></p><div class=reward-box><span>+${getRewardByTaskType(taskType)} ₫</span></div><div><strong>🔑 MÃ XÁC MINH CỦA BẠN:</strong></div><div class=key-box id="keyText">${tokenValue}</div><button class="copy-btn" onclick="copyKey()">📋 COPY MÃ</button><div class=warning-box>⚠️ Mỗi IP chỉ được sử dụng cho 1 tài khoản duy nhất!<br>📌 Sau khi copy mã, quay lại Bot và dán mã để nhận thưởng!</div></div><script>function copyKey(){const text=document.getElementById("keyText").innerText;navigator.clipboard.writeText(text).then(()=>alert("✅ Đã sao chép mã! Quay lại Bot để nhận thưởng!"));}</script></body></html>`);
 });
 
